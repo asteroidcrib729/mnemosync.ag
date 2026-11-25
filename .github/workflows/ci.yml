@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: PowerShell parse and PSScriptAnalyzer check
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ps = (Resolve-Path '.\Migrate-AntigravityWorkspace.ps1').Path
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($ps, [ref]$null, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+          }
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+          $issues = Invoke-ScriptAnalyzer -Path $ps -ExcludeRule PSAvoidUsingWriteHost -Severity Warning, Error
+          if ($issues) {
+              $issues | Format-Table -AutoSize
+              exit 1
+          }
+
+      - name: Lint Markdown files
+        run: npx --yes markdownlint-cli2 README.md RUNBOOK.md LICENSE
+
+      - name: Run automated migration test suite
+        run: python -m unittest discover -s tests -v
