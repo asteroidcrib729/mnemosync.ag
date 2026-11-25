@@ -82,7 +82,6 @@ if (-not (Test-Path -LiteralPath $NewProjectPath -PathType Container)) {
 }
 
 $ResolvedNewPath = (Resolve-Path -LiteralPath $NewProjectPath).Path.TrimEnd('\', '/')
-$NewLeafName     = Split-Path -Leaf $ResolvedNewPath
 $TrimmedOld      = $OldFolderName.Trim().TrimEnd('\', '/')
 $OldLeafName     = Split-Path -Leaf $TrimmedOld
 
