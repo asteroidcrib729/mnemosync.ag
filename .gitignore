@@ -1,0 +1,36 @@
+# Windows / OS artifacts
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Temporary, log, and backup artifacts
+*.tmp
+*.bak
+*.log
+*.vscdb-wal
+*.vscdb-shm
+*.vscdb-journal
+User_AutoBackup_*/
+Migration_FileBackup_*/
+antigravity_AutoBackup_*/
+
+# Local personal command scratch files
+Dry-Run.txt
+Application-Run.txt
+*.local.txt
+*.local.ps1
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
