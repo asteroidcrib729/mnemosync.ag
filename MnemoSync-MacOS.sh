@@ -6,9 +6,9 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  migrate-antigravity-workspace-macos.sh --new-project-path <path> --old-folder-name <name|path> [options]
-  migrate-antigravity-workspace-macos.sh --list-backups [--app-data-folder-name <name>]
-  migrate-antigravity-workspace-macos.sh --restore --backup-stamp <yyyyMMdd_HHmmss> [--apply] [--app-data-folder-name <name>]
+  MnemoSync-MacOS.sh --new-project-path <path> --old-folder-name <name|path> [options]
+  MnemoSync-MacOS.sh --list-backups [--app-data-folder-name <name>]
+  MnemoSync-MacOS.sh --restore --backup-stamp <yyyyMMdd_HHmmss> [--apply] [--app-data-folder-name <name>]
 
 Options:
   --new-project-path <path>        Target project directory (already renamed, or destination with --rename-on-disk)
@@ -34,7 +34,7 @@ fail() {
 }
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-    fail "migrate-antigravity-workspace-macos.sh is for macOS only (detected $(uname -s))."
+    fail "MnemoSync-MacOS.sh is for macOS only (detected $(uname -s))."
 fi
 
 NEW_PROJECT_PATH=""
@@ -309,7 +309,7 @@ GEMINI_ROOT="$HOME/.gemini"
 ANTIGRAVITY_RUNNING=0
 if ps -eo pid=,comm=,args= 2>/dev/null | awk -v self="$$" -v parent="$PPID" '
     $1 == self || $1 == parent { next }
-    tolower($0) ~ /migrate-antigravity-workspace|python[0-9.]*[[:space:]].*unittest/ { next }
+    tolower($0) ~ /mnemosync-macos|python[0-9.]*[[:space:]].*unittest/ { next }
     tolower($0) ~ /antigravity/ { found = 1 }
     END { exit(found ? 0 : 1) }
 '; then

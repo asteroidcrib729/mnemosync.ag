@@ -1,6 +1,6 @@
 # Antigravity Workspace Migration Runbook
 
-Operational runbook for [`Migrate-AntigravityWorkspace.ps1`](./Migrate-AntigravityWorkspace.ps1) — migrating, verifying, cleaning up, and recovering Antigravity IDE and Antigravity 2.0 project workspaces after renaming or moving a project root folder on Windows.
+Operational runbook for [`MnemoSync-Windows.ps1`](./MnemoSync-Windows.ps1) — migrating, verifying, cleaning up, and recovering Antigravity IDE and Antigravity 2.0 project workspaces after renaming or moving a project root folder on Windows.
 
 ---
 
@@ -27,7 +27,7 @@ Operational runbook for [`Migrate-AntigravityWorkspace.ps1`](./Migrate-Antigravi
 
 When you rename or move a project directory on Windows, Antigravity stores workspace identity using an MD5 hash of the lowercase-drive filesystem path concatenated with the folder's integer creation timestamp (`birthtime` in milliseconds), plus URI and path references across VS Code state, hot-exit backups, protobuf blobs, and `.gemini` project/conversation files. Simply reopening the renamed folder causes Antigravity to treat it as a brand-new workspace or show a **"Different Workspace"** warning.
 
-`Migrate-AntigravityWorkspace.ps1` preserves workspace state, extension state, sidebar entries, Antigravity 2.0 projects, and conversation metadata by matching the **full old path** case-insensitively (raw paths, percent-encoded and double percent-encoded URIs, JSON-escaped paths, and nested/base64-wrapped protobuf payloads) and rewriting it to the new path.
+`MnemoSync-Windows.ps1` preserves workspace state, extension state, sidebar entries, Antigravity 2.0 projects, and conversation metadata by matching the **full old path** case-insensitively (raw paths, percent-encoded and double percent-encoded URIs, JSON-escaped paths, and nested/base64-wrapped protobuf payloads) and rewriting it to the new path.
 
 ### Locations Updated
 
@@ -47,9 +47,9 @@ When you rename or move a project directory on Windows, Antigravity stores works
 ## 2. Prerequisites
 
 - **OS & Script:**
-  - **Windows:** [`Migrate-AntigravityWorkspace.ps1`](./Migrate-AntigravityWorkspace.ps1) (PowerShell / `powershell -ExecutionPolicy Bypass`).
-  - **Linux:** [`migrate-antigravity-workspace-linux.sh`](./migrate-antigravity-workspace-linux.sh) (Bash, `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE`).
-  - **macOS:** [`migrate-antigravity-workspace-macos.sh`](./migrate-antigravity-workspace-macos.sh) (Bash/zsh, `~/Library/Application Support/Antigravity IDE`).
+  - **Windows:** [`MnemoSync-Windows.ps1`](./MnemoSync-Windows.ps1) (PowerShell / `powershell -ExecutionPolicy Bypass`).
+  - **Linux:** [`MnemoSync-Linux.sh`](./MnemoSync-Linux.sh) (Bash, `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE`).
+  - **macOS:** [`MnemoSync-MacOS.sh`](./MnemoSync-MacOS.sh) (Bash/zsh, `~/Library/Application Support/Antigravity IDE`).
 - **Python 3:** `python` / `py -3` (Windows) or `python3` (Linux/macOS) must be available in `PATH` (used for transactional SQLite and wire-level protobuf updates).
 - **External Terminal & Closed Apps (for write operations):**
   - Both the **Antigravity IDE** and the **Antigravity agent app** must be completely closed before running a migration dry-run/apply or `-Cleanup -Apply`.
@@ -108,7 +108,7 @@ The script will immediately fail (`exit 1`) if you pass:
 1. Save any open files and close **all** Antigravity IDE windows and the Antigravity agent app (check the system tray / Task Manager for lingering `Antigravity` background processes).
 2. Rename or move the project folder on disk (Explorer, `Rename-Item`, `Move-Item`, etc.) — **or** leave it at the old path and add `-RenameOnDisk` to Steps 2–3 so the script renames it safely for you.
    - If you have not renamed the folder yet and omit `-RenameOnDisk`, dry-run/apply will refuse with: `The old path still exists on disk: ... Rename/move the folder first (or pass -RenameOnDisk).`
-3. Open an **external** PowerShell terminal and `cd` to the directory containing `Migrate-AntigravityWorkspace.ps1`.
+3. Open an **external** PowerShell terminal and `cd` to the directory containing `MnemoSync-Windows.ps1`.
 
 ---
 
@@ -119,7 +119,7 @@ Always preview first (omit `-Apply`). Nothing on disk is modified.
 **Same-parent rename** (only the folder name changed):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name"
 ```
@@ -127,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
 **Cross-parent move** (project moved to a different parent directory — pass the full old path):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "D:\Repos\new-project-name" `
   -OldFolderName "C:\OldFolder\old-project-name"
 ```
@@ -135,7 +135,7 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
 **Case-only rename** (e.g., `MyProject` -> `myproject` on Windows):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "C:\Repos\myproject" `
   -OldFolderName "MyProject"
 ```
@@ -158,7 +158,7 @@ Look for these tags in stdout before committing:
 With Antigravity still completely closed, add `-Apply`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Apply
@@ -184,7 +184,7 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
 `-Apply` runs this automatically at the end, and you can re-run it standalone at any time (even while Antigravity is running):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Verify
@@ -230,7 +230,7 @@ After confirming everything works in Antigravity, use `-Cleanup` to safely remov
 #### 5A. Preview Cleanup (Read-Only)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Cleanup
@@ -239,7 +239,7 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
 To also preview pruning aged backup directories created by the script:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Cleanup -IncludeBackups -KeepBackupDays 7
@@ -250,7 +250,7 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
 Close Antigravity completely, then add `-Apply`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Cleanup -Apply
@@ -259,7 +259,7 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
 With optional backup pruning:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Cleanup -Apply -IncludeBackups -KeepBackupDays 7
@@ -312,19 +312,19 @@ If a runtime error occurs inside the Python engine during `-Apply`:
 1. **List available backup timestamps** (read-only):
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -ListBackups
+   powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -ListBackups
    ```
 
 2. **Preview what `-Restore` will revert** (read-only):
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000
+   powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -Restore -BackupStamp 20261126_120000
    ```
 
 3. **Close Antigravity completely and restore:**
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000 -Apply
+   powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -Restore -BackupStamp 20261126_120000 -Apply
    ```
 
    `-Restore -Apply` replaces `User` from `User_AutoBackup_<stamp>`, replays non-`User` files (such as `.gemini` and `Backups`) from `Migration_FileBackup_<stamp>\manifest.jsonl`, removes newly tracked files/folders, and runs `PRAGMA integrity_check` on every restored database.
@@ -379,7 +379,7 @@ If you prefer to revert a migration manually without `-Restore`:
 | `[Workspace] No source workspaceStorage folder matched ...` | Verify `-OldFolderName` spelling, or pass the full old path if the folder was moved from another parent directory. Check `%APPDATA%\Antigravity IDE\User\workspaceStorage\*\workspace.json`. |
 | Opened the renamed folder *before* running the script | Still recoverable: close Antigravity and run `-Apply` normally. The script copies your old workspace state into the target hash folder (keeping `workspace.json`) and ignores/flags any mismatched hash folders for `-Cleanup`. |
 | `NOT VERIFIED - N check(s) failed` (`exit 2`) after `-Apply` | Review the `[FAIL]` lines in the Verification Report. Most commonly Antigravity was open or a file was locked; close Antigravity and re-run `-Apply`, then verify again. |
-| PowerShell blocks running `.ps1` (`ExecutionPolicy`) | Invoke with `powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 ...`. |
+| PowerShell blocks running `.ps1` (`ExecutionPolicy`) | Invoke with `powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 ...`. |
 
 ---
 
@@ -388,43 +388,43 @@ If you prefer to revert a migration manually without `-Restore`:
 - **Compressed or encrypted blobs:** Binary payloads that are compressed or encrypted cannot be decoded as protobuf or UTF-8 text and are left untouched.
 - **SQLite special tables skipped:** `sqlite_*` internal tables, `WITHOUT ROWID` tables, and generic `VIRTUAL TABLE`s are skipped (except `conversations_fts` in `conversation_summaries.db`, whose `workspace` and `project` columns are updated and integrity-checked).
 - **`.gemini` file size caps:** Protobuf `.pb` files larger than **50 MB** and `.json`/`.md`/`.txt`/`.pbtxt` files larger than **10 MB** are skipped during `.gemini` scanning.
-- **Platform separation:** Each OS has its own native script ([`Migrate-AntigravityWorkspace.ps1`](./Migrate-AntigravityWorkspace.ps1) for Windows, [`migrate-antigravity-workspace-linux.sh`](./migrate-antigravity-workspace-linux.sh) for Linux, and [`migrate-antigravity-workspace-macos.sh`](./migrate-antigravity-workspace-macos.sh) for macOS) and must be executed on its matching OS.
+- **Platform separation:** Each OS has its own native script ([`MnemoSync-Windows.ps1`](./MnemoSync-Windows.ps1) for Windows, [`MnemoSync-Linux.sh`](./MnemoSync-Linux.sh) for Linux, and [`MnemoSync-MacOS.sh`](./MnemoSync-MacOS.sh) for macOS) and must be executed on its matching OS.
 
 ---
 
 ## 9. Quick-Reference Cheat Sheet
 
-### Windows (`Migrate-AntigravityWorkspace.ps1`)
+### Windows (`MnemoSync-Windows.ps1`)
 
 ```powershell
 # 1. Dry-run preview (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name"
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name"
 
 # 2. Apply migration + automatic verification (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Apply
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Apply
 
 # 2b. Rename on disk AND migrate in one step (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -RenameOnDisk -Apply
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -RenameOnDisk -Apply
 
 # 3. Standalone verification (read-only, safe anytime)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Verify
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Verify
 
 # 4. Leftover cleanup preview (read-only)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Cleanup
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Cleanup
 
 # 5. Delete verified leftovers + prune script backups older than 7 days (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Cleanup -Apply -IncludeBackups -KeepBackupDays 7
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Cleanup -Apply -IncludeBackups -KeepBackupDays 7
 
 # 6. List backups and restore a prior migration snapshot (Antigravity closed for -Apply)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -ListBackups
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000 -Apply
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -ListBackups
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -Restore -BackupStamp 20261126_120000 -Apply
 ```
 
 ### Linux & macOS (`--long-flag` Equivalents)
 
 The Linux and macOS shell scripts share identical CLI flags and workflow. Make them executable once (`chmod +x *.sh`), ensure Antigravity is closed for write commands, and pass:
 
-| Windows Switch / Path | Linux (`migrate-antigravity-workspace-linux.sh`) | macOS (`migrate-antigravity-workspace-macos.sh`) |
+| Windows Switch / Path | Linux (`MnemoSync-Linux.sh`) | macOS (`MnemoSync-MacOS.sh`) |
 | --- | --- | --- |
 | Data root | `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE` | `$HOME/Library/Application Support/Antigravity IDE` |
 | Workspace hash salt | Directory inode (`st_ino`) | Creation time in integer ms (`birthtime`) |
@@ -432,12 +432,12 @@ The Linux and macOS shell scripts share identical CLI flags and workflow. Make t
 | CLI flags | `--new-project-path`, `--old-folder-name`, `--app-data-folder-name`, `--apply`, `--verify`, `--cleanup`, `--include-backups`, `--keep-backup-days`, `--overwrite-existing-state`, `--rename-on-disk`, `--list-backups`, `--restore`, `--backup-stamp` | Same `--long-flag` interface as Linux |
 
 ```bash
-# Linux (or replace with ./migrate-antigravity-workspace-macos.sh on macOS)
-chmod +x ./migrate-antigravity-workspace-linux.sh
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name"
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --apply
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --verify
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --cleanup --apply
-./migrate-antigravity-workspace-linux.sh --list-backups
-./migrate-antigravity-workspace-linux.sh --restore --backup-stamp 20261126_120000 --apply
+# Linux (or replace with ./MnemoSync-MacOS.sh on macOS)
+chmod +x ./MnemoSync-Linux.sh
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name"
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --apply
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --verify
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --cleanup --apply
+./MnemoSync-Linux.sh --list-backups
+./MnemoSync-Linux.sh --restore --backup-stamp 20261126_120000 --apply
 ```

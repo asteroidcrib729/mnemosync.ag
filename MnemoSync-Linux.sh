@@ -6,9 +6,9 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  migrate-antigravity-workspace-linux.sh --new-project-path <path> --old-folder-name <name|path> [options]
-  migrate-antigravity-workspace-linux.sh --list-backups [--app-data-folder-name <name>]
-  migrate-antigravity-workspace-linux.sh --restore --backup-stamp <yyyyMMdd_HHmmss> [--apply] [--app-data-folder-name <name>]
+  MnemoSync-Linux.sh --new-project-path <path> --old-folder-name <name|path> [options]
+  MnemoSync-Linux.sh --list-backups [--app-data-folder-name <name>]
+  MnemoSync-Linux.sh --restore --backup-stamp <yyyyMMdd_HHmmss> [--apply] [--app-data-folder-name <name>]
 
 Options:
   --new-project-path <path>        Target project directory (already renamed, or destination with --rename-on-disk)
@@ -34,7 +34,7 @@ fail() {
 }
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    fail "migrate-antigravity-workspace-linux.sh is for Linux only (detected $(uname -s))."
+    fail "MnemoSync-Linux.sh is for Linux only (detected $(uname -s))."
 fi
 
 NEW_PROJECT_PATH=""
@@ -278,7 +278,7 @@ GEMINI_ROOT="$HOME/.gemini"
 ANTIGRAVITY_RUNNING=0
 if ps -eo pid=,comm=,args= 2>/dev/null | awk -v self="$$" -v parent="$PPID" '
     $1 == self || $1 == parent { next }
-    tolower($0) ~ /migrate-antigravity-workspace|python[0-9.]*[[:space:]].*unittest/ { next }
+    tolower($0) ~ /mnemosync-linux|python[0-9.]*[[:space:]].*unittest/ { next }
     tolower($0) ~ /antigravity/ { found = 1 }
     END { exit(found ? 0 : 1) }
 '; then

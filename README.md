@@ -5,9 +5,9 @@
 
 Dedicated native migration utilities for **Windows**, **Linux**, and **macOS** that preserve Antigravity IDE workspaces, VS Code extension/editor state, local edit history, hot-exit backups, Antigravity 2.0 projects, and conversation metadata/search indexes after renaming or moving a project root directory:
 
-- **Windows:** [`Migrate-AntigravityWorkspace.ps1`](./Migrate-AntigravityWorkspace.ps1)
-- **Linux:** [`migrate-antigravity-workspace-linux.sh`](./migrate-antigravity-workspace-linux.sh)
-- **macOS:** [`migrate-antigravity-workspace-macos.sh`](./migrate-antigravity-workspace-macos.sh)
+- **Windows:** [`MnemoSync-Windows.ps1`](./MnemoSync-Windows.ps1)
+- **Linux:** [`MnemoSync-Linux.sh`](./MnemoSync-Linux.sh)
+- **macOS:** [`MnemoSync-MacOS.sh`](./MnemoSync-MacOS.sh)
 
 ## Features
 
@@ -22,8 +22,8 @@ Dedicated native migration utilities for **Windows**, **Linux**, and **macOS** t
 
 - **OS & Shell:**
   - **Windows:** PowerShell (`-ExecutionPolicy Bypass` if script execution is restricted)
-  - **Linux:** Bash (`migrate-antigravity-workspace-linux.sh`, uses `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE`)
-  - **macOS:** Bash/zsh (`migrate-antigravity-workspace-macos.sh`, uses `~/Library/Application Support/Antigravity IDE`)
+  - **Linux:** Bash (`MnemoSync-Linux.sh`, uses `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE`)
+  - **macOS:** Bash/zsh (`MnemoSync-MacOS.sh`, uses `~/Library/Application Support/Antigravity IDE`)
 - **Python 3:** `python` / `py -3` (Windows) or `python3` (Linux/macOS) in `PATH` (standard library only — no third-party packages required)
 - **Closed Apps (for write operations):** Close both Antigravity IDE and the Antigravity agent app completely and run from an external terminal. (Verify, list-backups, cleanup preview, and restore preview are read-only.)
 
@@ -35,54 +35,54 @@ Dedicated native migration utilities for **Windows**, **Linux**, and **macOS** t
 
 ```powershell
 # 1. Dry-run preview (no changes written)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name"
 
 # 2. Apply migration + automatic verification
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 `
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 `
   -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" `
   -OldFolderName "old-project-name" `
   -Apply
 
 # 3. Standalone verify, leftover cleanup, and backup restore
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" -OldFolderName "old-project-name" -Verify
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" -OldFolderName "old-project-name" -Cleanup -Apply
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -ListBackups
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" -OldFolderName "old-project-name" -Verify
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-project-name" -OldFolderName "old-project-name" -Cleanup -Apply
+powershell -ExecutionPolicy Bypass -File .\MnemoSync-Windows.ps1 -ListBackups
 ```
 
 ### Linux (Bash)
 
 ```bash
-chmod +x ./migrate-antigravity-workspace-linux.sh
+chmod +x ./MnemoSync-Linux.sh
 
 # 1. Dry-run preview
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name"
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name"
 
 # 2. Apply migration + automatic verification
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name" --apply
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name" --apply
 
 # 3. Verify, cleanup, and backup restore
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name" --verify
-./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name" --cleanup --apply
-./migrate-antigravity-workspace-linux.sh --list-backups
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name" --verify
+./MnemoSync-Linux.sh --new-project-path "$HOME/src/new-project-name" --old-folder-name "old-project-name" --cleanup --apply
+./MnemoSync-Linux.sh --list-backups
 ```
 
 ### macOS (Terminal)
 
 ```bash
-chmod +x ./migrate-antigravity-workspace-macos.sh
+chmod +x ./MnemoSync-MacOS.sh
 
 # 1. Dry-run preview
-./migrate-antigravity-workspace-macos.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name"
+./MnemoSync-MacOS.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name"
 
 # 2. Apply migration + automatic verification
-./migrate-antigravity-workspace-macos.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name" --apply
+./MnemoSync-MacOS.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name" --apply
 
 # 3. Verify, cleanup, and backup restore
-./migrate-antigravity-workspace-macos.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name" --verify
-./migrate-antigravity-workspace-macos.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name" --cleanup --apply
-./migrate-antigravity-workspace-macos.sh --list-backups
+./MnemoSync-MacOS.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name" --verify
+./MnemoSync-MacOS.sh --new-project-path "$HOME/Projects/new-project-name" --old-folder-name "old-project-name" --cleanup --apply
+./MnemoSync-MacOS.sh --list-backups
 ```
 
 ## Documentation

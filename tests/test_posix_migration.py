@@ -16,8 +16,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LINUX_SCRIPT = REPO_ROOT / "migrate-antigravity-workspace-linux.sh"
-MACOS_SCRIPT = REPO_ROOT / "migrate-antigravity-workspace-macos.sh"
+LINUX_SCRIPT = REPO_ROOT / "MnemoSync-Linux.sh"
+MACOS_SCRIPT = REPO_ROOT / "MnemoSync-MacOS.sh"
 
 
 def extract_shell_python_engine(script_path: Path) -> str:
@@ -458,7 +458,7 @@ class _NativePosixE2EMixin:
 
 @unittest.skipUnless(sys.platform == "linux", "Native Linux runner only")
 class LinuxNativeTests(_NativePosixE2EMixin, unittest.TestCase):
-    """Native end-to-end tests for migrate-antigravity-workspace-linux.sh."""
+    """Native end-to-end tests for MnemoSync-Linux.sh."""
 
     script_path = LINUX_SCRIPT
     platform_mode = "linux"
@@ -469,7 +469,7 @@ class LinuxNativeTests(_NativePosixE2EMixin, unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "Native macOS runner only")
 class MacOSNativeTests(_NativePosixE2EMixin, unittest.TestCase):
-    """Native end-to-end tests for migrate-antigravity-workspace-macos.sh."""
+    """Native end-to-end tests for MnemoSync-MacOS.sh."""
 
     script_path = MACOS_SCRIPT
     platform_mode = "macos"

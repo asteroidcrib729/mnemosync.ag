@@ -31,7 +31,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $ps = (Resolve-Path '.\Migrate-AntigravityWorkspace.ps1').Path
+          $ps = (Resolve-Path '.\MnemoSync-Windows.ps1').Path
           $parseErrors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile($ps, [ref]$null, [ref]$parseErrors)
           if ($parseErrors.Count -gt 0) {
@@ -69,8 +69,8 @@ jobs:
 
       - name: Bash syntax and ShellCheck
         run: |
-          bash -n ./migrate-antigravity-workspace-linux.sh
-          shellcheck ./migrate-antigravity-workspace-linux.sh
+          bash -n ./MnemoSync-Linux.sh
+          shellcheck ./MnemoSync-Linux.sh
 
       - name: Run Linux migration tests
         run: python3 -m unittest discover -s tests -p "test_posix_migration.py" -v
@@ -88,8 +88,8 @@ jobs:
 
       - name: Bash syntax and ShellCheck
         run: |
-          bash -n ./migrate-antigravity-workspace-macos.sh
-          shellcheck ./migrate-antigravity-workspace-macos.sh
+          bash -n ./MnemoSync-MacOS.sh
+          shellcheck ./MnemoSync-MacOS.sh
 
       - name: Run macOS migration tests
         run: python3 -m unittest discover -s tests -p "test_posix_migration.py" -v

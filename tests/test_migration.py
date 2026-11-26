@@ -1,4 +1,4 @@
-"""Automated regression tests for Migrate-AntigravityWorkspace.ps1."""
+"""Automated regression tests for MnemoSync-Windows.ps1."""
 
 import base64
 import binascii
@@ -19,11 +19,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_PATH = REPO_ROOT / "Migrate-AntigravityWorkspace.ps1"
+SCRIPT_PATH = REPO_ROOT / "MnemoSync-Windows.ps1"
 
 
 def extract_python_engine() -> str:
-    """Extract the embedded Python engine source from Migrate-AntigravityWorkspace.ps1."""
+    """Extract the embedded Python engine source from MnemoSync-Windows.ps1."""
     raw = SCRIPT_PATH.read_text(encoding="utf-8")
     marker = "$pyScript = @'"
     start = raw.index(marker) + len(marker)
@@ -162,7 +162,7 @@ def build_sidebar_value(entries: list[str]) -> str:
     return base64.b64encode(bytes(top)).decode("ascii")
 
 
-@unittest.skipUnless(os.name == "nt", "Migrate-AntigravityWorkspace.ps1 is Windows-only")
+@unittest.skipUnless(os.name == "nt", "MnemoSync-Windows.ps1 is Windows-only")
 class MigrationTests(unittest.TestCase):
     """End-to-end tests for migration, verification, rollback, and cleanup."""
 
