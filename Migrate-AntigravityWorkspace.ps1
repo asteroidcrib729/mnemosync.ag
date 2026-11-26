@@ -3,58 +3,94 @@
     Preserves Antigravity workspaces / projects after a project root directory was renamed.
 
 .DESCRIPTION
-    Run AFTER renaming the folder on disk, with Antigravity (IDE + agent app) fully closed.
-    Dry-run by default; pass -Apply to commit changes.
+    Run AFTER renaming the folder on disk (or pass -RenameOnDisk to let the script rename it),
+    with Antigravity (IDE + agent app) fully closed. Dry-run by default; pass -Apply to commit.
 
     Updates (every reference to the OLD full path is rewritten, case-insensitively, in raw,
     percent-encoded, JSON-escaped and base64-wrapped protobuf form):
-      * <AppData>\<AppDataFolderName>\User\workspaceStorage\<md5>   (state copied to the new hash)
+      * <AppData>\<AppDataFolderName>\User\workspaceStorage\<md5>   (folder & .code-workspace state)
       * <AppData>\<AppDataFolderName>\User\globalStorage\{state.vscdb, storage.json}
+      * <AppData>\<AppDataFolderName>\User\History\<hash>           (VS Code Local History)
       * <AppData>\<AppDataFolderName>\Backups\{workspaces.json, <hash>\...}
-      * ~\.gemini\antigravity, ~\.gemini\antigravity-ide    (.db / .pb / .json / .md / .txt / .pbtxt)
+      * ~\.gemini\antigravity, ~\.gemini\antigravity-ide    (.db / .pb / .json / .md / .txt / .pbtxt,
+                                                             including conversation_summaries.db FTS5)
       * ~\.gemini\config\projects\*.json, ~\.gemini\projects.json   (Antigravity 2.0 projects)
 
 .PARAMETER NewProjectPath
-    Existing (already renamed) project directory.
+    Target project directory (already renamed on disk, or the destination path when -RenameOnDisk is set).
 .PARAMETER OldFolderName
     Old folder name (leaf) or the full old path. A leaf name is assumed to live in the same parent as the new path.
+.PARAMETER AppDataFolderName
+    Folder name under %APPDATA% for Antigravity IDE data (default: "Antigravity IDE").
 .PARAMETER Apply
-    Commit changes. Every modified file is backed up first and restored automatically on failure.
-    A read-only verification report is printed automatically after a successful apply.
+    Commit changes (migration, cleanup, or restore). Without -Apply, runs as a read-only dry-run / preview.
+    During migration, -Apply creates backups and runs the verification report automatically afterward.
 .PARAMETER Verify
     Read-only audit: confirms the migration took effect (workspace hash, state databases, sidebar list,
-    Antigravity projects, conversation index) and lists any remaining references to the old path.
+    local history, Antigravity projects, conversation index) and lists any remaining old-path references.
     Prints a PASS/WARN/FAIL checklist and a verdict; exit code 2 if any check fails. Safe to run any time.
 .PARAMETER Cleanup
-    Leftover cleanup AFTER a migration. Runs the verification first and refuses to delete anything unless
-    it has no FAIL results. Targets: the old workspaceStorage entry, stale duplicate entries for the new
-    folder, and their hot-exit Backups folders. Preview by default; add -Apply to really delete.
-    Never re-runs the migration itself.
+    Leftover cleanup AFTER a migration. Runs verification first and refuses to delete anything unless
+    there are no FAIL results. Targets: old/stale workspaceStorage entries, migrated hot-exit Backups
+    folders, and migrated User\History folders. Preview by default; add -Apply to really delete.
 .PARAMETER IncludeBackups
     With -Cleanup: also delete the script's own safety backups (User_AutoBackup_*, Migration_FileBackup_*,
     .gemini\antigravity_AutoBackup_*) older than -KeepBackupDays. The newest backup of each kind is always kept.
 .PARAMETER KeepBackupDays
     Age threshold in days for -IncludeBackups (default 7).
+.PARAMETER OverwriteExistingState
+    Force copying old workspaceStorage state over a newer, already-populated target state.vscdb.
+    By default, newer target UI state is protected from accidental re-apply overwrites.
+.PARAMETER RenameOnDisk
+    Rename/move OldFolderName -> NewProjectPath on disk automatically (after confirming Antigravity is
+    closed and no SQLite locks exist), then migrate metadata. Rolled back if migration fails.
+.PARAMETER ListBackups
+    List available migration backup timestamps (User_AutoBackup_*, Migration_FileBackup_*,
+    antigravity_AutoBackup_*) and exit. Read-only.
+.PARAMETER Restore
+    Restore a prior migration backup identified by -BackupStamp. Preview by default; add -Apply to restore.
+.PARAMETER BackupStamp
+    Backup timestamp (yyyyMMdd_HHmmss) to restore with -Restore.
 #>
+[CmdletBinding(DefaultParameterSetName = 'Migrate')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Migrate')]
     [string]$NewProjectPath,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Migrate')]
     [string]$OldFolderName,
 
     [string]$AppDataFolderName = "Antigravity IDE",
 
     [switch]$Apply,
 
+    [Parameter(ParameterSetName = 'Migrate')]
     [switch]$Verify,
 
+    [Parameter(ParameterSetName = 'Migrate')]
     [switch]$Cleanup,
 
+    [Parameter(ParameterSetName = 'Migrate')]
     [switch]$IncludeBackups,
 
+    [Parameter(ParameterSetName = 'Migrate')]
     [ValidateRange(0, 3650)]
-    [int]$KeepBackupDays = 7
+    [int]$KeepBackupDays = 7,
+
+    [Parameter(ParameterSetName = 'Migrate')]
+    [switch]$OverwriteExistingState,
+
+    [Parameter(ParameterSetName = 'Migrate')]
+    [switch]$RenameOnDisk,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ListBackups')]
+    [switch]$ListBackups,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Restore')]
+    [switch]$Restore,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Restore')]
+    [string]$BackupStamp
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,42 +100,122 @@ function Fail([string]$Message) {
     exit 1
 }
 
+function Test-PathSyntax([string]$Value, [string]$ParamName) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        Fail "$ParamName must not be empty."
+    }
+    if ($Value -match '[<>]') {
+        Fail ("{0} contains '<' or '>' ('{1}'). It looks like you left a placeholder like <User> in the path. Replace it with a real path or use `$env:USERPROFILE." -f $ParamName, $Value)
+    }
+    if ($Value -match '["|?*\x00-\x1F]') {
+        Fail ("{0} contains illegal Windows path characters: '{1}'." -f $ParamName, $Value)
+    }
+    # Allow a drive-letter colon only at index 1 (e.g. C:\...)
+    $rest = if ($Value.Length -ge 2 -and $Value[1] -eq ':') { $Value.Substring(2) } else { $Value }
+    if ($rest.Contains(':')) {
+        Fail ("{0} contains an invalid ':' character: '{1}'." -f $ParamName, $Value)
+    }
+}
+
+function Move-DirectorySafely([string]$Source, [string]$Destination, [bool]$IsCaseOnly) {
+    if ($IsCaseOnly) {
+        $parentDir = Split-Path -Parent $Source
+        $tempSibling = Join-Path $parentDir (".ag_rename_tmp_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+        Move-Item -LiteralPath $Source -Destination $tempSibling
+        Move-Item -LiteralPath $tempSibling -Destination $Destination
+    } else {
+        Move-Item -LiteralPath $Source -Destination $Destination
+    }
+}
+
+$paramSet = $PSCmdlet.ParameterSetName
 if ($Apply -and $Verify) {
     Fail "-Apply and -Verify cannot be combined. -Apply already runs the verification report when it finishes."
 }
-if ($Cleanup -and ($Verify)) {
+if ($Cleanup -and $Verify) {
     Fail "-Cleanup already runs the verification report first; do not combine it with -Verify."
 }
 if ($IncludeBackups -and -not $Cleanup) {
     Fail "-IncludeBackups only applies together with -Cleanup."
 }
-# Read-only runs: -Verify, or -Cleanup without -Apply (preview). They may run while Antigravity is open.
-$ReadOnlyRun = $Verify -or ($Cleanup -and -not $Apply)
-
-# 1. Validate inputs
-if (-not (Test-Path -LiteralPath $NewProjectPath -PathType Container)) {
-    Fail "Target project directory does not exist: $NewProjectPath"
+if ($ListBackups -and $Apply) {
+    Fail "-ListBackups is read-only and cannot be combined with -Apply."
+}
+if ($RenameOnDisk -and ($Verify -or $Cleanup)) {
+    Fail "-RenameOnDisk cannot be combined with -Verify or -Cleanup."
+}
+if ($OverwriteExistingState -and ($Verify -or $Cleanup)) {
+    Fail "-OverwriteExistingState cannot be combined with -Verify or -Cleanup."
 }
 
-$ResolvedNewPath = (Resolve-Path -LiteralPath $NewProjectPath).Path.TrimEnd('\', '/')
-$TrimmedOld      = $OldFolderName.Trim().TrimEnd('\', '/')
-$OldLeafName     = Split-Path -Leaf $TrimmedOld
+$ReadOnlyRun = $Verify -or $ListBackups -or ($Cleanup -and -not $Apply) -or ($Restore -and -not $Apply)
 
-if ($TrimmedOld -match '^[A-Za-z]:[\\/]') {
-    $OldFullPath = $TrimmedOld
-} else {
-    $OldFullPath = Join-Path (Split-Path $ResolvedNewPath -Parent) $OldLeafName
-}
+# 1. Validate paths (when running Migrate set)
+$ResolvedNewPath = ""
+$OldFullPath     = ""
+$IsCaseOnly      = $false
 
-if ([string]::IsNullOrWhiteSpace($OldLeafName)) {
-    Fail "OldFolderName must not be empty."
-}
-# Case-sensitive comparison: a case-only rename (Foo -> foo) is a legitimate rename on Windows.
-if ($OldFullPath -ceq $ResolvedNewPath) {
-    Fail "Old path ('$OldFullPath') and target path are identical; nothing to migrate."
-}
-if (($OldFullPath -ine $ResolvedNewPath) -and (Test-Path -LiteralPath $OldFullPath) -and -not $Verify -and -not $Cleanup) {
-    Fail "The old path still exists on disk: $OldFullPath. Rename/move the folder first."
+if ($paramSet -eq 'Migrate') {
+    Test-PathSyntax $NewProjectPath "NewProjectPath"
+    Test-PathSyntax $OldFolderName "OldFolderName"
+
+    $TrimmedNew = $NewProjectPath.Trim().TrimEnd('\', '/')
+    $TrimmedOld = $OldFolderName.Trim().TrimEnd('\', '/')
+    $OldLeafName = Split-Path -Leaf $TrimmedOld
+    if ([string]::IsNullOrWhiteSpace($OldLeafName)) {
+        Fail "OldFolderName must not be empty."
+    }
+
+    if ($RenameOnDisk) {
+        $NewLeaf = Split-Path -Leaf $TrimmedNew
+        if ([string]::IsNullOrWhiteSpace($NewLeaf)) {
+            Fail "NewProjectPath must include a folder name: $NewProjectPath"
+        }
+        $NewParentRaw = Split-Path -Parent $TrimmedNew
+        if ([string]::IsNullOrWhiteSpace($NewParentRaw)) {
+            $NewParentRaw = (Get-Location).Path
+        }
+        if (-not (Test-Path -LiteralPath $NewParentRaw -PathType Container)) {
+            Fail "Parent directory for NewProjectPath does not exist: $NewParentRaw"
+        }
+        $ResolvedNewParent = (Resolve-Path -LiteralPath $NewParentRaw).Path.TrimEnd('\', '/')
+        $ResolvedNewPath   = Join-Path $ResolvedNewParent $NewLeaf
+        $OldFullPath = if ($TrimmedOld -match '^[A-Za-z]:[\\/]') { $TrimmedOld } else { Join-Path $ResolvedNewParent $OldLeafName }
+
+        if ($OldFullPath -ceq $ResolvedNewPath) {
+            Fail "Old path ('$OldFullPath') and target path are identical; nothing to rename."
+        }
+        if (-not (Test-Path -LiteralPath $OldFullPath -PathType Container)) {
+            Fail "Source project directory to rename does not exist: $OldFullPath"
+        }
+        $OldFullPath = (Resolve-Path -LiteralPath $OldFullPath).Path.TrimEnd('\', '/')
+        $IsCaseOnly  = ($OldFullPath -ieq $ResolvedNewPath) -and ($OldFullPath -cne $ResolvedNewPath)
+        if ((-not $IsCaseOnly) -and (Test-Path -LiteralPath $ResolvedNewPath)) {
+            Fail "Target project directory already exists: $ResolvedNewPath. Remove -RenameOnDisk if you already renamed it on disk."
+        }
+    } else {
+        if (-not (Test-Path -LiteralPath $TrimmedNew -PathType Container)) {
+            Fail "Target project directory does not exist: $NewProjectPath"
+        }
+        $ResolvedNewPath = (Resolve-Path -LiteralPath $TrimmedNew).Path.TrimEnd('\', '/')
+        $OldFullPath = if ($TrimmedOld -match '^[A-Za-z]:[\\/]') {
+            $TrimmedOld
+        } else {
+            Join-Path (Split-Path $ResolvedNewPath -Parent) $OldLeafName
+        }
+
+        # Case-sensitive comparison: a case-only rename (Foo -> foo) is a legitimate rename on Windows.
+        if ($OldFullPath -ceq $ResolvedNewPath) {
+            Fail "Old path ('$OldFullPath') and target path are identical; nothing to migrate."
+        }
+        if (($OldFullPath -ine $ResolvedNewPath) -and (Test-Path -LiteralPath $OldFullPath) -and -not $Verify -and -not $Cleanup) {
+            Fail "The old path still exists on disk: $OldFullPath. Rename/move the folder first (or pass -RenameOnDisk)."
+        }
+    }
+} elseif ($paramSet -eq 'Restore') {
+    if ($BackupStamp -notmatch '^\d{8}_\d{6}$') {
+        Fail "BackupStamp must have format yyyyMMdd_HHmmss (got '$BackupStamp'). Run with -ListBackups to see available stamps."
+    }
 }
 
 $AppDataRoot = Join-Path $env:APPDATA $AppDataFolderName
@@ -110,7 +226,7 @@ if (-not (Test-Path -LiteralPath $UserDir -PathType Container)) {
     Fail "Antigravity User directory not found: $UserDir"
 }
 
-# 2. Ensure Antigravity is completely closed and no SQLite locks exist
+# 2. Ensure Antigravity is completely closed and no SQLite locks exist (for write operations)
 $running = Get-Process | Where-Object { $_.ProcessName -match "Antigravity" }
 if ($running -and $ReadOnlyRun) {
     Write-Host "NOTE: Antigravity is running. This run is read-only and checks what is on disk right now; close Antigravity first for the most reliable result." -ForegroundColor Yellow
@@ -135,11 +251,25 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
     Fail "Python 3 is required in PATH to perform transactional SQLite and Protobuf wire-level updates."
 }
 
-# 4. Safety copies (Apply only). The Python engine additionally backs up every individual file
-#    it touches and restores them automatically if anything fails.
+# 4. Optional on-disk rename (-RenameOnDisk) + safety backups
+$renamedOnDisk  = $false
+$renameDryRun   = $false
 $userBackupPath = $null
 $fileBackupDir  = ""
-if ($Apply -and -not $Cleanup) {
+
+if ($RenameOnDisk) {
+    if ($Apply) {
+        Write-Host "[Rename]    Renaming on disk: $OldFullPath -> $ResolvedNewPath" -ForegroundColor Cyan
+        Move-DirectorySafely $OldFullPath $ResolvedNewPath $IsCaseOnly
+        $renamedOnDisk   = $true
+        $ResolvedNewPath = (Resolve-Path -LiteralPath $ResolvedNewPath).Path.TrimEnd('\', '/')
+    } else {
+        Write-Host "[Rename]    Would rename on disk: $OldFullPath -> $ResolvedNewPath" -ForegroundColor Cyan
+        $renameDryRun = $true
+    }
+}
+
+if ($Apply -and ($paramSet -eq 'Migrate') -and -not $Cleanup) {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $userBackupPath = Join-Path $AppDataRoot "User_AutoBackup_$stamp"
     $fileBackupDir  = Join-Path $AppDataRoot "Migration_FileBackup_$stamp"
@@ -148,17 +278,22 @@ if ($Apply -and -not $Cleanup) {
     Write-Host "[Backup] Per-file backups (incl. .gemini) will go to: $fileBackupDir" -ForegroundColor Cyan
 }
 
-$env:AG_NEW_PATH   = $ResolvedNewPath
-$env:AG_OLD_PATH   = $OldFullPath
-$env:AG_USER_DIR   = $UserDir
-$env:AG_GEMINI_ROOT = $GeminiRoot
-$env:AG_APPLY      = if ($Apply) { "1" } else { "0" }
-$env:AG_BACKUP_DIR = $fileBackupDir
-$env:AG_VERIFY     = if ($Verify) { "1" } else { "0" }
-$env:AG_CLEANUP    = if ($Cleanup) { "1" } else { "0" }
+$env:AG_NEW_PATH        = $ResolvedNewPath
+$env:AG_OLD_PATH        = $OldFullPath
+$env:AG_APP_ROOT        = $AppDataRoot
+$env:AG_USER_DIR        = $UserDir
+$env:AG_GEMINI_ROOT     = $GeminiRoot
+$env:AG_APPLY           = if ($Apply) { "1" } else { "0" }
+$env:AG_BACKUP_DIR      = $fileBackupDir
+$env:AG_VERIFY          = if ($Verify) { "1" } else { "0" }
+$env:AG_CLEANUP         = if ($Cleanup) { "1" } else { "0" }
 $env:AG_INCLUDE_BACKUPS = if ($IncludeBackups) { "1" } else { "0" }
-$env:AG_KEEP_DAYS  = "$KeepBackupDays"
-$env:PYTHONIOENCODING = "utf-8"
+$env:AG_KEEP_DAYS       = "$KeepBackupDays"
+$env:AG_OVERWRITE_STATE = if ($OverwriteExistingState) { "1" } else { "0" }
+$env:AG_RENAME_DRYRUN   = if ($renameDryRun) { "1" } else { "0" }
+$env:AG_LIST_BACKUPS    = if ($ListBackups) { "1" } else { "0" }
+$env:AG_RESTORE_STAMP   = if ($Restore) { $BackupStamp } else { "" }
+$env:PYTHONIOENCODING   = "utf-8"
 
 $pyScript = @'
 import base64
@@ -177,9 +312,7 @@ from urllib.parse import quote, unquote, urlparse
 if os.name != "nt":
     sys.exit("This tool supports Windows only.")
 
-NEW_PATH = Path(os.environ["AG_NEW_PATH"]).resolve()
-NEW_NAME = NEW_PATH.name
-OLD_PATH_ARG = os.environ["AG_OLD_PATH"]
+APP_ROOT = Path(os.environ.get("AG_APP_ROOT") or Path(os.environ["AG_USER_DIR"]).parent)
 USER_DIR = Path(os.environ["AG_USER_DIR"])
 GEMINI_ROOT = Path(os.environ["AG_GEMINI_ROOT"])
 APPLY = os.environ["AG_APPLY"] == "1"
@@ -187,7 +320,16 @@ VERIFY = os.environ.get("AG_VERIFY") == "1"
 CLEANUP = os.environ.get("AG_CLEANUP") == "1"
 INCLUDE_BACKUPS = os.environ.get("AG_INCLUDE_BACKUPS") == "1"
 KEEP_DAYS = int(os.environ.get("AG_KEEP_DAYS", "7"))
+OVERWRITE_STATE = os.environ.get("AG_OVERWRITE_STATE") == "1"
+RENAME_DRYRUN = os.environ.get("AG_RENAME_DRYRUN") == "1"
+LIST_BACKUPS = os.environ.get("AG_LIST_BACKUPS") == "1"
+RESTORE_STAMP = os.environ.get("AG_RESTORE_STAMP", "").strip()
 BACKUP_DIR = Path(os.environ["AG_BACKUP_DIR"]) if os.environ.get("AG_BACKUP_DIR") else None
+
+NEW_PATH_RAW = os.environ.get("AG_NEW_PATH", "")
+OLD_PATH_ARG = os.environ.get("AG_OLD_PATH", "")
+NEW_PATH = Path(os.path.realpath(NEW_PATH_RAW)) if NEW_PATH_RAW else None
+NEW_NAME = NEW_PATH.name if NEW_PATH else ""
 
 MAX_DEPTH = 8
 S = {"changed": 0}
@@ -488,10 +630,13 @@ def transform_blob(b: bytes):
 
 
 # ---------------------------------------------------------------------------
-# VS Code workspace identity helpers
+# VS Code workspace & history identity helpers
 # ---------------------------------------------------------------------------
 def get_birthtime_ms(target: Path) -> int:
     """Integer ms, identical to VS Code on Windows: Math.floor(stat.birthtimeMs)."""
+    if RENAME_DRYRUN and not target.exists() and S.get("old_path") and Path(str(S["old_path"])).exists():
+        target = Path(str(S["old_path"]))
+
     class FILETIME(ctypes.Structure):
         _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
 
@@ -513,11 +658,23 @@ def get_birthtime_ms(target: Path) -> int:
     return getattr(st, "st_birthtime_ns", st.st_ctime_ns) // 1_000_000
 
 
-def workspace_hash(folder: Path) -> str:
-    fs_path = str(folder)
+def workspace_hash(target: Path, bt_source: Path = None) -> str:
+    """Compute VS Code workspaceStorage hash for a folder or .code-workspace file."""
+    fs_path = str(target)
     if len(fs_path) >= 2 and fs_path[1] == ":":
         fs_path = fs_path[0].lower() + fs_path[1:]
-    return hashlib.md5((fs_path + str(get_birthtime_ms(folder))).encode("utf-8")).hexdigest()
+    bt = get_birthtime_ms(bt_source or target)
+    return hashlib.md5((fs_path + str(bt)).encode("utf-8")).hexdigest()
+
+
+def vscode_string_hash(s: str) -> str:
+    """Exact VS Code stringHash(s, 0) used for User/History folder names."""
+    h = 149417  # numberHash(149417, 0)
+    for ch in s:
+        h = (((h << 5) - h) + ord(ch)) & 0xFFFFFFFF
+    if h >= 0x80000000:
+        h -= 0x100000000
+    return f"-{-h:x}" if h < 0 else f"{h:x}"
 
 
 def vscode_uri(p: Path) -> str:
@@ -542,6 +699,30 @@ def newest(paths):
         f = d / "state.vscdb"
         return (f if f.exists() else d).stat().st_mtime
     return max(paths, key=key)
+
+
+def dir_size(p: Path) -> int:
+    total = 0
+    for dp, _, fn in os.walk(p):
+        for f in fn:
+            try:
+                total += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    return total
+
+
+def human(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%.1f %s" % (n, unit) if unit != "B" else "%d B" % n
+        n /= 1024.0
+
+
+def _force_remove(func, path, _exc):
+    import stat
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +791,151 @@ class Tx:
 def log(tag: str, msg: str):
     S["changed"] += 1
     print(("[%s]" % tag).ljust(12) + msg)
+
+
+# ---------------------------------------------------------------------------
+# Backup listing and one-command restore (-ListBackups / -Restore)
+# ---------------------------------------------------------------------------
+STAMP_RE = re.compile(r"^\d{8}_\d{6}$")
+
+
+def list_backups() -> int:
+    specs = [
+        (APP_ROOT, re.compile(r"^(User_AutoBackup)_(\d{8}_\d{6})$"), "User directory snapshot"),
+        (APP_ROOT, re.compile(r"^(Migration_FileBackup)_(\d{8}_\d{6})$"), "Per-file backup + manifest"),
+        (GEMINI_ROOT, re.compile(r"^(antigravity_AutoBackup)_(\d{8}_\d{6})$"), "Legacy .gemini snapshot"),
+    ]
+    by_stamp = {}
+    for root, rx, _desc in specs:
+        if not root.is_dir():
+            continue
+        for d in root.iterdir():
+            if not d.is_dir():
+                continue
+            m = rx.match(d.name)
+            if not m:
+                continue
+            kind, stamp = m.group(1), m.group(2)
+            info = {"path": d, "size": dir_size(d)}
+            if kind == "Migration_FileBackup":
+                mf = d / "manifest.jsonl"
+                if mf.is_file():
+                    info["entries"] = sum(1 for ln in mf.read_text(encoding="utf-8").splitlines() if ln.strip())
+            by_stamp.setdefault(stamp, {})[kind] = info
+
+    print("\n===== Available migration backups =====")
+    if not by_stamp:
+        print("No backups found under %s or %s." % (APP_ROOT, GEMINI_ROOT))
+        return 0
+    for stamp in sorted(by_stamp.keys(), reverse=True):
+        parts = []
+        for kind in ("User_AutoBackup", "Migration_FileBackup", "antigravity_AutoBackup"):
+            if kind in by_stamp[stamp]:
+                item = by_stamp[stamp][kind]
+                extra = ", %d manifest entries" % item["entries"] if "entries" in item else ""
+                parts.append("%s (%s%s)" % (kind, human(item["size"]), extra))
+        print("%s  |  %s" % (stamp, " ; ".join(parts)))
+    newest_stamp = sorted(by_stamp.keys(), reverse=True)[0]
+    print("\nPreview restore : -Restore -BackupStamp %s" % newest_stamp)
+    print("Apply restore   : -Restore -BackupStamp %s -Apply" % newest_stamp)
+    return 0
+
+
+def restore_backup(stamp: str, do_apply: bool) -> int:
+    if not STAMP_RE.match(stamp):
+        print("ERROR: Invalid BackupStamp '%s'. Expected yyyyMMdd_HHmmss." % stamp)
+        return 1
+    user_bak = APP_ROOT / ("User_AutoBackup_" + stamp)
+    file_bak = APP_ROOT / ("Migration_FileBackup_" + stamp)
+    has_user = user_bak.is_dir()
+    has_file = file_bak.is_dir()
+    if not has_user and not has_file:
+        print("ERROR: No backup found for stamp '%s' under %s." % (stamp, APP_ROOT))
+        return 1
+
+    manifest_entries = []
+    manifest_file = file_bak / "manifest.jsonl"
+    if manifest_file.is_file():
+        for ln in manifest_file.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if ln:
+                manifest_entries.append(json.loads(ln))
+    elif has_file and not has_user:
+        print("ERROR: Backup %s has no manifest.jsonl and no User_AutoBackup exists for this stamp." % file_bak)
+        return 1
+
+    user_norm = os.path.normcase(os.path.normpath(str(USER_DIR)))
+
+    def inside_user(p: Path) -> bool:
+        pn = os.path.normcase(os.path.normpath(str(p)))
+        return pn == user_norm or pn.startswith(user_norm + os.sep)
+
+    print("\n===== Restore from backup %s (%s) =====" % (stamp, "APPLYING" if do_apply else "preview - nothing modified"))
+    if has_user:
+        print("[RESTORE] User directory <- %s" % user_bak)
+
+    file_actions = []
+    for entry in reversed(manifest_entries):
+        if "orig" in entry and "backup" in entry:
+            orig = Path(entry["orig"])
+            bak = Path(entry["backup"])
+            if has_user and inside_user(orig):
+                continue  # covered by the full User_AutoBackup snapshot
+            file_actions.append(("copy", orig, bak))
+            print("[RESTORE] %s <- %s" % (orig, bak.name))
+        elif "created" in entry:
+            created = Path(entry["created"])
+            if has_user and inside_user(created):
+                continue
+            if created.exists():
+                file_actions.append(("delete", created, None))
+                print("[REMOVE]  %s (created during migration)" % created)
+
+    if not do_apply:
+        print("\nStatus: RESTORE PREVIEW COMPLETE (re-run with -Apply to restore)")
+        return 0
+
+    db_to_check = []
+    if has_user:
+        if USER_DIR.exists():
+            shutil.rmtree(USER_DIR, onerror=_force_remove)
+        shutil.copytree(user_bak, USER_DIR)
+        for db in USER_DIR.rglob("*.vscdb"):
+            if db.is_file():
+                db_to_check.append(db)
+
+    for action, target, src in file_actions:
+        if action == "copy":
+            if not src.is_file():
+                print("ERROR: Missing backup file %s" % src)
+                return 1
+            for ext in ("-wal", "-shm", "-journal"):
+                side = Path(str(target) + ext)
+                if side.exists():
+                    side.unlink()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+            if target.suffix.lower() in (".db", ".vscdb"):
+                db_to_check.append(target)
+        elif action == "delete" and target.exists():
+            if target.is_dir():
+                shutil.rmtree(target, onerror=_force_remove)
+            else:
+                target.unlink()
+
+    seen_db = set()
+    for db in db_to_check:
+        norm = os.path.normcase(os.path.normpath(str(db)))
+        if norm in seen_db or not db.is_file():
+            continue
+        seen_db.add(norm)
+        ok, _ = db_health(db, check_item_table=False)
+        if ok != "ok":
+            print("ERROR: Integrity check failed on restored database %s: %s" % (db, ok))
+            return 1
+
+    print("\nStatus: RESTORE COMPLETED SUCCESSFULLY (verified %d database(s))" % len(seen_db))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -707,10 +1033,56 @@ def convert_value(val):
     return None
 
 
+def collect_fts_changes(conn, shown: str):
+    """Collect workspace/project column updates in conversations_fts for migrated conversations."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "conversation_summaries" not in tables or "conversations_fts" not in tables:
+        return []
+    new_pat = build_path_regex(PureWindowsPath(str(NEW_PATH)))
+    old_pat = S["pattern"]
+    old_leaf_low = S["old_leaf"].lower()
+    old_enc_low = quote(S["old_leaf"], safe="").lower()
+    new_enc = quote(NEW_NAME, safe="")
+
+    cids = set()
+    for cid, w_uris in conn.execute("SELECT conversation_id, workspace_uris FROM conversation_summaries"):
+        if isinstance(w_uris, str) and (old_pat.search(w_uris) or new_pat.search(w_uris)):
+            cids.add(cid)
+    if not cids:
+        return []
+
+    fts_changes = []
+    cid_list = list(cids)
+    for i in range(0, len(cid_list), 200):
+        chunk = cid_list[i:i + 200]
+        ph = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            "SELECT rowid, conversation_id, workspace, project FROM conversations_fts "
+            "WHERE conversation_id IN (%s)" % ph,
+            chunk,
+        ).fetchall()
+        for rowid, cid, ws, proj in rows:
+            new_ws = ws
+            new_proj = proj
+            if isinstance(ws, str):
+                wsl = ws.lower()
+                if wsl == old_enc_low:
+                    new_ws = new_enc
+                elif wsl == old_leaf_low:
+                    new_ws = NEW_NAME
+            if isinstance(proj, str) and proj.lower() == old_leaf_low:
+                new_proj = NEW_NAME
+            if new_ws != ws or new_proj != proj:
+                fts_changes.append((rowid, cid, new_ws, new_proj))
+                log("SQLite", "%s -> conversations_fts [conversation_id=%s]" % (shown, cid))
+    return fts_changes
+
+
 def process_sqlite(db_path: Path, tx: Tx, shown: str):
     if not db_path.is_file():
         return
     changes = []
+    fts_changes = []
     try:
         conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error as exc:
@@ -740,7 +1112,12 @@ def process_sqlite(db_path: Path, tx: Tx, shown: str):
                 print("[SQLite]    skipped table %s in %s (%s)" % (tname, shown, exc))
         for tname, col, _, _, ident in changes:
             log("SQLite", "%s -> %s.%s [%s]" % (shown, tname, col, str(ident)[:80]))
-        if not (APPLY and changes):
+        if db_path.name.lower() == "conversation_summaries.db":
+            try:
+                fts_changes = collect_fts_changes(conn, shown)
+            except sqlite3.Error as exc:
+                print("[SQLite]    skipped FTS5 in %s (%s)" % (shown, exc))
+        if not (APPLY and (changes or fts_changes)):
             return
         pre = conn.execute("PRAGMA integrity_check;").fetchone()[0]
         if pre != "ok":
@@ -755,7 +1132,14 @@ def process_sqlite(db_path: Path, tx: Tx, shown: str):
         rw.execute("BEGIN IMMEDIATE;")
         for tname, col, rowid, new, _ in changes:
             rw.execute('UPDATE "%s" SET "%s" = ? WHERE rowid = ?' % (tname, col), (new, rowid))
+        for rowid, _cid, new_ws, new_proj in fts_changes:
+            rw.execute(
+                "UPDATE conversations_fts SET workspace = ?, project = ? WHERE rowid = ?",
+                (new_ws, new_proj, rowid),
+            )
         rw.commit()
+        if fts_changes:
+            rw.execute("INSERT INTO conversations_fts(conversations_fts) VALUES('integrity-check');")
         post = rw.execute("PRAGMA integrity_check;").fetchone()[0]
         if post != "ok":
             raise RuntimeError("SQLite integrity check failed after update on %s: %s" % (db_path, post))
@@ -789,6 +1173,170 @@ def copy_tree_tracked(src: Path, dst: Path, tx: Tx, skip=("workspace.json",)):
             else:
                 tx.track_created(target)
             shutil.copy2(item, target)
+
+
+def copy_workspace_state_if_safe(old_ws_dir: Path, new_ws_dir: Path, tx: Tx) -> bool:
+    """Copy workspaceStorage state unless the target DB is already newer and populated."""
+    if old_ws_dir == new_ws_dir:
+        return True
+    new_db = new_ws_dir / "state.vscdb"
+    old_db = old_ws_dir / "state.vscdb"
+    if new_db.is_file() and old_db.is_file() and not OVERWRITE_STATE:
+        ok_n, new_cnt = db_health(new_db)
+        ok_o, old_cnt = db_health(old_db)
+        if ok_n == "ok" and ok_o == "ok" and new_db.stat().st_mtime > old_db.stat().st_mtime and new_cnt >= old_cnt:
+            print(
+                "[Workspace] Target state.vscdb is newer and already populated (%d vs %d entries); "
+                "skipping state copy to protect newer UI state. Pass -OverwriteExistingState to force."
+                % (new_cnt, old_cnt)
+            )
+            return False
+    print("[Workspace] Copy state & extensions: %s -> %s (preserving workspace.json)"
+          % (old_ws_dir.name, new_ws_dir.name))
+    if APPLY:
+        copy_tree_tracked(old_ws_dir, new_ws_dir, tx)
+    return True
+
+
+def migrate_local_history(tx: Tx):
+    """Migrate VS Code Local History (User/History/<stringHash>/entries.json)."""
+    hist_root = USER_DIR / "History"
+    if not hist_root.is_dir():
+        return
+    for d in sorted(hist_root.iterdir()):
+        ej = d / "entries.json"
+        if not (d.is_dir() and ej.is_file()):
+            continue
+        try:
+            data = json.loads(ej.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        resource = data.get("resource")
+        if not isinstance(resource, str):
+            continue
+        new_res, ch = transform_string(resource)
+        if not ch:
+            continue
+        target_name = vscode_string_hash(new_res)
+        target_dir = hist_root / target_name
+        log("History", "User/History/%s -> %s" % (d.name, target_name))
+        if not APPLY:
+            continue
+
+        if d != target_dir:
+            if not target_dir.exists():
+                tx.track_created(target_dir)
+                target_dir.mkdir(parents=True)
+            for item in d.iterdir():
+                if item.name == "entries.json" or not item.is_file():
+                    continue
+                dest = target_dir / item.name
+                if not dest.exists():
+                    tx.track_created(dest)
+                    shutil.copy2(item, dest)
+
+        target_ej = target_dir / "entries.json"
+        data["resource"] = new_res
+        if target_ej.is_file():
+            tx.backup_file(target_ej)
+            if d != target_dir:
+                try:
+                    existing = json.loads(target_ej.read_text(encoding="utf-8-sig"))
+                    merged = {}
+                    for e in data.get("entries", []):
+                        if isinstance(e, dict) and "id" in e:
+                            merged[e["id"]] = e
+                    for e in existing.get("entries", []):
+                        if isinstance(e, dict) and "id" in e:
+                            merged[e["id"]] = e
+                    data["entries"] = sorted(merged.values(), key=lambda x: x.get("timestamp", 0))
+                except Exception:
+                    pass
+        else:
+            tx.track_created(target_ej)
+        target_ej.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def migrate_multiroot_workspaces(tx: Tx):
+    """Migrate multi-root .code-workspace storage entries and rewrite paths inside .code-workspace files."""
+    ws_root = USER_DIR / "workspaceStorage"
+    if not ws_root.is_dir():
+        return
+    backups_root = USER_DIR.parent / "Backups"
+    old_pat = S["pattern"]
+    seen_files = set()
+    ws_files_to_update = []
+
+    for d in sorted(ws_root.iterdir()):
+        wj = d / "workspace.json"
+        if not (d.is_dir() and wj.is_file()):
+            continue
+        try:
+            data = json.loads(wj.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        ws_uri = data.get("workspace")
+        if not isinstance(ws_uri, str):
+            continue
+        ws_raw = uri_to_path(ws_uri)
+        if not ws_raw:
+            continue
+
+        if old_pat.search(ws_uri) or old_pat.search(ws_raw):
+            new_uri_str, _ = transform_string(ws_uri)
+            new_raw = uri_to_path(new_uri_str)
+            if not new_raw:
+                continue
+            new_ws_file = Path(new_raw)
+            old_ws_file = Path(ws_raw)
+            if new_ws_file.is_file():
+                target_hash = workspace_hash(new_ws_file)
+            elif RENAME_DRYRUN and old_ws_file.is_file():
+                target_hash = workspace_hash(new_ws_file, bt_source=old_ws_file)
+            else:
+                target_hash = None
+
+            if target_hash:
+                target_dir = ws_root / target_hash
+                print("[Workspace] Multi-root storage: %s -> %s" % (d.name, target_hash))
+                if APPLY:
+                    if not target_dir.exists():
+                        tx.track_created(target_dir)
+                        target_dir.mkdir(parents=True)
+                    twj = target_dir / "workspace.json"
+                    if not twj.exists():
+                        tx.track_created(twj)
+                        with open(twj, "w", encoding="utf-8", newline="\n") as fh:
+                            fh.write(json.dumps({"workspace": vscode_uri(new_ws_file)}, indent=2))
+                copied = copy_workspace_state_if_safe(d, target_dir, tx)
+                old_bak, new_bak = backups_root / d.name, backups_root / target_dir.name
+                if old_bak.exists() and not new_bak.exists() and d != target_dir:
+                    print("[Backups]   Migrate hot-exit folder: %s -> %s" % (old_bak.name, new_bak.name))
+                    if APPLY:
+                        tx.track_created(new_bak)
+                        shutil.copytree(old_bak, new_bak)
+                        for meta in new_bak.rglob("meta.json"):
+                            process_text_file(
+                                meta, "json", tx, "Backups",
+                                "Backups/%s" % meta.relative_to(backups_root).as_posix(), backup=False,
+                            )
+                db_dir = target_dir if (APPLY or not copied) else d
+                process_sqlite(db_dir / "state.vscdb", tx, "workspaceStorage/%s/state.vscdb" % db_dir.name)
+
+            cand_file = old_ws_file if (RENAME_DRYRUN and old_ws_file.is_file()) else new_ws_file
+            if cand_file.is_file():
+                ws_files_to_update.append(cand_file)
+        else:
+            ws_file = Path(ws_raw)
+            if ws_file.is_file():
+                ws_files_to_update.append(ws_file)
+
+    for ws_file in ws_files_to_update:
+        norm = os.path.normcase(os.path.normpath(str(ws_file)))
+        if norm in seen_files:
+            continue
+        seen_files.add(norm)
+        process_text_file(ws_file, "json", tx, "WorkspaceFile", str(ws_file))
 
 
 SKIP_DIRS = {".system_generated", "browser_recordings", "tempmediastorage", "node_modules", ".git",
@@ -881,12 +1429,12 @@ def read_item(db_path: Path, key: str):
     return v.decode("utf-8", "ignore") if isinstance(v, (bytes, bytearray)) else v
 
 
-def db_health(db_path: Path):
+def db_health(db_path: Path, check_item_table: bool = True):
     try:
         conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)
         try:
             ok = conn.execute("PRAGMA integrity_check;").fetchone()[0]
-            n = conn.execute("SELECT COUNT(*) FROM ItemTable").fetchone()[0]
+            n = conn.execute("SELECT COUNT(*) FROM ItemTable").fetchone()[0] if check_item_table else 0
         finally:
             conn.close()
         return ok, n
@@ -918,19 +1466,35 @@ def verify() -> int:
     ws_root = USER_DIR / "workspaceStorage"
     expected_hash = workspace_hash(NEW_PATH)
     new_dirs, old_dirs = [], []
+    multi_old_dirs, multi_live_dirs, multi_stale_dirs = [], [], []
+    ws_files_to_check = []
     if ws_root.is_dir():
         for d in ws_root.iterdir():
             try:
-                raw = uri_to_path(json.loads((d / "workspace.json").read_text(encoding="utf-8-sig")).get("folder", ""))
+                wdata = json.loads((d / "workspace.json").read_text(encoding="utf-8-sig"))
             except Exception:
                 continue
-            if raw is None:
+            raw = uri_to_path(wdata.get("folder", ""))
+            if raw is not None:
+                norm = os.path.normcase(os.path.normpath(raw))
+                if norm == expected_new:
+                    new_dirs.append(d)
+                elif norm == expected_old:
+                    old_dirs.append(d)
                 continue
-            norm = os.path.normcase(os.path.normpath(raw))
-            if norm == expected_new:
-                new_dirs.append(d)
-            elif norm == expected_old:
-                old_dirs.append(d)
+            ws_uri = wdata.get("workspace", "")
+            ws_raw = uri_to_path(ws_uri) if isinstance(ws_uri, str) else None
+            if ws_raw:
+                ws_file = Path(ws_raw)
+                if ws_file.is_file():
+                    ws_files_to_check.append(ws_file)
+                if old_pat.search(ws_uri) or old_pat.search(ws_raw):
+                    multi_old_dirs.append(d)
+                elif new_pat.search(ws_uri) or new_pat.search(ws_raw):
+                    if ws_file.is_file() and d.name == workspace_hash(ws_file):
+                        multi_live_dirs.append(d)
+                    else:
+                        multi_stale_dirs.append(d)
 
     # 1. workspace identity ------------------------------------------------
     exp_dir = ws_root / expected_hash
@@ -949,11 +1513,17 @@ def verify() -> int:
     elif new_dirs:
         add("FAIL", "Workspace is registered under a hash the IDE will NOT use for this folder",
             "found: %s | expected: %s" % (", ".join(d.name for d in new_dirs), expected_hash))
+    elif multi_live_dirs:
+        add("PASS", "Multi-root .code-workspace storage exists under the IDE hash",
+            ", ".join(d.name for d in multi_live_dirs))
+    elif multi_stale_dirs:
+        add("FAIL", "Multi-root workspace is registered under a hash the IDE will NOT use",
+            ", ".join(d.name for d in multi_stale_dirs))
     else:
         add("FAIL", "No workspaceStorage entry for the new folder",
             "expected %s - run the migration (or open the folder once, then migrate)" % expected_hash)
-    stale = [d.name for d in new_dirs if d.name != expected_hash]
-    if stale and exp_dir.is_dir():
+    stale = [d.name for d in new_dirs if d.name != expected_hash] + [d.name for d in multi_stale_dirs]
+    if stale and (exp_dir.is_dir() or multi_live_dirs):
         add("INFO", "Extra workspace entries point at the same folder (harmless leftovers)", ", ".join(stale))
 
     # 2. workspace state ---------------------------------------------------
@@ -969,6 +1539,21 @@ def verify() -> int:
             add("PASS", "Workspace state contains no references to the old path")
     elif exp_dir.is_dir():
         add("WARN", "Workspace state database missing (editor layout/history was not carried over)")
+
+    if ws_files_to_check:
+        ws_file_refs = []
+        seen_wsf = set()
+        for wsf in ws_files_to_check:
+            norm = os.path.normcase(os.path.normpath(str(wsf)))
+            if norm in seen_wsf:
+                continue
+            seen_wsf.add(norm)
+            ws_file_refs += capture(process_text_file, wsf, "json", tx, "WorkspaceFile", str(wsf))
+        if ws_file_refs:
+            add("FAIL", "Multi-root .code-workspace file(s) still reference the OLD path",
+                "; ".join(l.split("]", 1)[1].strip() for l in ws_file_refs[:5]))
+        else:
+            add("PASS", "Multi-root .code-workspace file(s) contain no references to the old path")
 
     # 3. global state ------------------------------------------------------
     gdb = USER_DIR / "globalStorage" / "state.vscdb"
@@ -1012,6 +1597,35 @@ def verify() -> int:
     else:
         add("PASS", "storage.json and hot-exit Backups contain no references to the old path")
 
+    # 3b. Local History (User/History) -------------------------------------
+    hist_root = USER_DIR / "History"
+    unmigrated_hist, old_hist_dirs = [], []
+    if hist_root.is_dir():
+        for d in sorted(hist_root.iterdir()):
+            ej = d / "entries.json"
+            if not (d.is_dir() and ej.is_file()):
+                continue
+            try:
+                res_uri = json.loads(ej.read_text(encoding="utf-8-sig")).get("resource")
+            except Exception:
+                continue
+            if not isinstance(res_uri, str):
+                continue
+            new_res, ch = transform_string(res_uri)
+            if not ch:
+                continue
+            target_dir = hist_root / vscode_string_hash(new_res)
+            if (target_dir / "entries.json").is_file():
+                if d != target_dir:
+                    old_hist_dirs.append((d, target_dir))
+            else:
+                unmigrated_hist.append(d.name)
+    if unmigrated_hist:
+        add("FAIL", "%d Local History folder(s) were not migrated to the new path" % len(unmigrated_hist),
+            ", ".join(unmigrated_hist[:5]))
+    else:
+        add("PASS", "Local History (User/History) has no unmigrated entries for the old path")
+
     # 4. Antigravity 2.0 projects -----------------------------------------
     matches = []
     pdir = GEMINI_ROOT / "config" / "projects"
@@ -1048,7 +1662,7 @@ def verify() -> int:
     # 5. .gemini scan (agent app + IDE) ------------------------------------
     lines = capture(scan_gemini, tx)
     proj = [l for l in lines if "config/projects" in l or l.endswith("projects.json")]
-    link = [l for l in lines if l not in proj and (".pb" in l or "agyhub" in l or "antigravity_state" in l)]
+    link = [l for l in lines if l not in proj and (".pb" in l or "agyhub" in l or "antigravity_state" in l or "conversations_fts" in l)]
     conv = [l for l in lines if l not in proj and l not in link]
     if proj:
         add("FAIL", "Project files still reference the OLD path", "; ".join(l.split("]", 1)[1].strip() for l in proj[:5]))
@@ -1065,11 +1679,21 @@ def verify() -> int:
         add("PASS", "Conversation databases and metadata contain no references to the old path")
 
     # 6. leftovers ---------------------------------------------------------
-    S["verify_info"] = {"exp_dir": exp_dir, "old_dirs": old_dirs,
-                        "stale": [d for d in new_dirs if d.name != expected_hash]}
-    if old_dirs:
+    all_old_dirs = old_dirs + multi_old_dirs
+    stale_dirs = [d for d in new_dirs if d.name != expected_hash] + multi_stale_dirs
+    S["verify_info"] = {
+        "exp_dir": exp_dir,
+        "live_multi_dirs": set(multi_live_dirs),
+        "old_dirs": all_old_dirs,
+        "stale": stale_dirs,
+        "old_history": old_hist_dirs,
+    }
+    if all_old_dirs:
         add("INFO", "Old workspace entry still on disk (kept as a safety copy)",
-            ", ".join(d.name for d in old_dirs) + " - safe to delete once you are satisfied")
+            ", ".join(d.name for d in all_old_dirs) + " - safe to delete once you are satisfied")
+    if old_hist_dirs:
+        add("INFO", "%d migrated Local History safety copy folder(s) on disk" % len(old_hist_dirs),
+            ", ".join(o.name for o, _ in old_hist_dirs[:5]))
     if os.path.exists(str(S["old_path"])) and expected_old != expected_new:
         add("WARN", "A folder still exists at the old path", str(S["old_path"]))
 
@@ -1090,7 +1714,7 @@ def verify() -> int:
     else:
         verdict = "VERIFIED - all checks passed."
     print("\nVerdict: " + verdict)
-    if not fails and not CLEANUP and (S["verify_info"]["old_dirs"] or S["verify_info"]["stale"]):
+    if not fails and not CLEANUP and (all_old_dirs or stale_dirs or old_hist_dirs):
         print("Tip: leftovers can be removed with -Cleanup (preview) / -Cleanup -Apply (delete).")
     return 2 if fails else 0
 
@@ -1099,37 +1723,16 @@ def verify() -> int:
 # Leftover cleanup (only after a clean verification)
 # ---------------------------------------------------------------------------
 HASH_RE = re.compile(r"^[0-9a-f]{32}$")
-
-
-def dir_size(p: Path) -> int:
-    total = 0
-    for dp, _, fn in os.walk(p):
-        for f in fn:
-            try:
-                total += os.path.getsize(os.path.join(dp, f))
-            except OSError:
-                pass
-    return total
-
-
-def human(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return "%.1f %s" % (n, unit) if unit != "B" else "%d B" % n
-        n /= 1024.0
-
-
-def _force_remove(func, path, _exc):
-    import stat
-    os.chmod(path, stat.S_IWRITE)
-    func(path)
+HIST_HASH_RE = re.compile(r"^-?[0-9a-f]{1,8}$")
 
 
 def cleanup(do_delete: bool) -> int:
     from datetime import datetime, timedelta
     info = S["verify_info"]
     exp_dir = info["exp_dir"]
+    protected_ws = {exp_dir} | set(info.get("live_multi_dirs", ()))
     ws_root = USER_DIR / "workspaceStorage"
+    hist_root = USER_DIR / "History"
     app_root = USER_DIR.parent
     backups_root = app_root / "Backups"
     items = []   # (path, reason, allowed_parent, name_regex)
@@ -1142,10 +1745,14 @@ def cleanup(do_delete: bool) -> int:
     for d, *_ in list(items):
         b = backups_root / d.name
         if b.is_dir():
-            if (backups_root / exp_dir.name).is_dir():
+            if any((backups_root / p.name).is_dir() for p in protected_ws if p.is_dir()) or (backups_root / exp_dir.name).is_dir():
                 items.append((b, "hot-exit backup of the removed workspace entry (migrated copy exists)", backups_root, HASH_RE))
             else:
                 skipped.append("Backups/%s kept: it holds unsaved-file backups that were not migrated" % d.name)
+
+    for old_h, new_h in info.get("old_history", []):
+        if (new_h / "entries.json").is_file() and old_h != new_h:
+            items.append((old_h, "migrated Local History folder (copy exists at %s)" % new_h.name, hist_root, HIST_HASH_RE))
 
     if INCLUDE_BACKUPS:
         cutoff = datetime.now() - timedelta(days=KEEP_DAYS)
@@ -1182,9 +1789,9 @@ def cleanup(do_delete: bool) -> int:
 
     total, freed, failed = 0, 0, 0
     for path, reason, parent, rx in items:
-        # Safety rails: exact expected parent, expected name shape, never the live workspace entry
+        # Safety rails: exact expected parent, expected name shape, never a live workspace entry
         same_parent = os.path.normcase(os.path.normpath(str(path.parent))) == os.path.normcase(os.path.normpath(str(parent)))
-        if not (same_parent and rx.match(path.name) and path != exp_dir and path.is_dir() and not path.is_symlink()):
+        if not (same_parent and rx.match(path.name) and path not in protected_ws and path.is_dir() and not path.is_symlink()):
             print("[SKIP]   %s (failed safety check)" % path)
             continue
         size = dir_size(path)
@@ -1258,6 +1865,7 @@ def run(tx: Tx):
     if others:
         print("[Workspace] Ignoring entries for the new folder under unused hashes: %s" % ", ".join(others))
 
+    ws_copied = True
     if old_ws_dir:
         print("[Workspace] Source hash folder : %s" % old_ws_dir.name)
         new_ws_creating = new_ws_dir is None
@@ -1275,11 +1883,7 @@ def run(tx: Tx):
                 tx.track_created(wj)
                 with open(wj, "w", encoding="utf-8", newline="\n") as fh:
                     fh.write(json.dumps({"folder": vscode_uri(NEW_PATH)}, indent=2))
-        if old_ws_dir != new_ws_dir:
-            print("[Workspace] Copy state & extensions: %s -> %s (preserving workspace.json)"
-                  % (old_ws_dir.name, new_ws_dir.name))
-            if APPLY:
-                copy_tree_tracked(old_ws_dir, new_ws_dir, tx)
+        ws_copied = copy_workspace_state_if_safe(old_ws_dir, new_ws_dir, tx)
 
         backups_root = USER_DIR.parent / "Backups"
         old_bak, new_bak = backups_root / old_ws_dir.name, backups_root / new_ws_dir.name
@@ -1294,18 +1898,20 @@ def run(tx: Tx):
     else:
         print("[Workspace] No source workspaceStorage folder matched '%s'." % S["old_leaf"])
 
-    # Step 2: SQLite state (global + the migrated workspace)
+    # Step 2: SQLite state (global + migrated workspace + multi-root .code-workspace)
     process_sqlite(USER_DIR / "globalStorage" / "state.vscdb", tx, "globalStorage/state.vscdb")
-    candidates = [new_ws_dir, old_ws_dir] if APPLY else [old_ws_dir, new_ws_dir]
+    candidates = [new_ws_dir, old_ws_dir] if (APPLY or not ws_copied) else [old_ws_dir, new_ws_dir]
     ws_db_dir = next((c for c in candidates if c), None)
     if ws_db_dir:
         process_sqlite(ws_db_dir / "state.vscdb", tx, "workspaceStorage/%s/state.vscdb" % ws_db_dir.name)
+    migrate_multiroot_workspaces(tx)
 
-    # Step 3: JSON state
+    # Step 3: JSON state & Local History (User/History)
     process_text_file(USER_DIR / "globalStorage" / "storage.json", "json", tx, "JSON", "globalStorage/storage.json")
     process_text_file(USER_DIR.parent / "Backups" / "workspaces.json", "json", tx, "JSON", "Backups/workspaces.json")
+    migrate_local_history(tx)
 
-    # Step 4: .gemini (agent app + IDE + 2.0 projects)
+    # Step 4: .gemini (agent app + IDE + 2.0 projects + FTS5)
     scan_gemini(tx)
 
     print("\nItems %s: %d" % ("updated" if APPLY else "to update", S["changed"]))
@@ -1313,10 +1919,17 @@ def run(tx: Tx):
 
 
 def main():
+    global APPLY
+    if LIST_BACKUPS:
+        sys.exit(list_backups())
+    if RESTORE_STAMP:
+        do_restore = APPLY
+        APPLY = False
+        sys.exit(restore_backup(RESTORE_STAMP, do_restore))
+
     # Expand 8.3 short names in the parent so old and new paths use the same spelling as the stored URIs.
     _old = Path(OLD_PATH_ARG)
     set_old_path(Path(os.path.realpath(_old.parent)) / _old.name)
-    global APPLY
     if CLEANUP:
         do_delete = APPLY
         APPLY = False  # the verification gate is strictly read-only
@@ -1366,7 +1979,15 @@ try {
     }
 } catch {
     Write-Warning "Migration encountered an error: $_"
-    if ($Apply) {
+    if ($renamedOnDisk -and (Test-Path -LiteralPath $ResolvedNewPath -PathType Container)) {
+        try {
+            Move-DirectorySafely $ResolvedNewPath $OldFullPath $IsCaseOnly
+            Write-Host "[Rollback] Renamed project directory back to: $OldFullPath" -ForegroundColor Yellow
+        } catch {
+            Write-Warning "Could not rename project directory back to '$OldFullPath': $_"
+        }
+    }
+    if ($Apply -and ($paramSet -eq 'Migrate') -and -not $Cleanup) {
         Write-Warning "The engine restores every file it modified. Safety copies: $userBackupPath and $fileBackupDir"
     }
     exit 1

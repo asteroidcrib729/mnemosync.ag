@@ -45,6 +45,11 @@ jobs:
               exit 1
           }
 
+      - name: Lint Python tests with Ruff
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: 'check tests/'
+
       - name: Lint Markdown files
         run: npx --yes markdownlint-cli2 README.md RUNBOOK.md LICENSE
 

@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import quote
@@ -181,23 +182,29 @@ class MigrationTests(unittest.TestCase):
     def run_engine(
         self,
         *,
-        new_path: Path,
-        old_path: Path,
+        new_path: Path | None = None,
+        old_path: Path | None = None,
         user_dir: Path,
         gemini_root: Path,
+        app_root: Path | None = None,
         backup_dir: Path | None = None,
         apply: bool = False,
         verify: bool = False,
         cleanup: bool = False,
         include_backups: bool = False,
         keep_days: int = 7,
+        overwrite_state: bool = False,
+        rename_dryrun: bool = False,
+        list_backups: bool = False,
+        restore_stamp: str = "",
     ) -> subprocess.CompletedProcess[str]:
         """Run the extracted Python engine in an isolated subprocess."""
         env = os.environ.copy()
         env.update(
             {
-                "AG_NEW_PATH": str(new_path),
-                "AG_OLD_PATH": str(old_path),
+                "AG_NEW_PATH": str(new_path) if new_path else "",
+                "AG_OLD_PATH": str(old_path) if old_path else "",
+                "AG_APP_ROOT": str(app_root or user_dir.parent),
                 "AG_USER_DIR": str(user_dir),
                 "AG_GEMINI_ROOT": str(gemini_root),
                 "AG_APPLY": "1" if apply else "0",
@@ -206,6 +213,10 @@ class MigrationTests(unittest.TestCase):
                 "AG_CLEANUP": "1" if cleanup else "0",
                 "AG_INCLUDE_BACKUPS": "1" if include_backups else "0",
                 "AG_KEEP_DAYS": str(keep_days),
+                "AG_OVERWRITE_STATE": "1" if overwrite_state else "0",
+                "AG_RENAME_DRYRUN": "1" if rename_dryrun else "0",
+                "AG_LIST_BACKUPS": "1" if list_backups else "0",
+                "AG_RESTORE_STAMP": restore_stamp,
                 "PYTHONIOENCODING": "utf-8",
             }
         )
@@ -742,6 +753,398 @@ class MigrationTests(unittest.TestCase):
             self.assertNotIn("Repos/MyApp", recent)
         finally:
             c_gdb.close()
+
+    def test_friendly_illegal_path_char_error(self) -> None:
+        """Placeholder/illegal characters in paths produce friendly ERROR messages, not raw exceptions."""
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPT_PATH),
+                "-NewProjectPath",
+                r"C:\Users\<User>\Downloads\proj",
+                "-OldFolderName",
+                "old",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("ERROR:", out)
+        self.assertIn("placeholder", out)
+        self.assertNotIn("ArgumentException", out)
+
+    def test_overwrite_protection_and_force_override(self) -> None:
+        """Newer populated target state.vscdb is protected by default unless -OverwriteExistingState is set."""
+        fx = self.create_fixture()
+        expected_hash = compute_vscode_workspace_hash(fx["new_dir"])
+        target_ws = fx["user_dir"] / "workspaceStorage" / expected_hash
+        target_ws.mkdir(parents=True)
+        (target_ws / "workspace.json").write_text(
+            json.dumps({"folder": vscode_uri(fx["new_dir"])}, indent=2), encoding="utf-8"
+        )
+        target_db = target_ws / "state.vscdb"
+        make_item_db(
+            target_db,
+            [
+                ("sentinel.newer", "keep-this-newer-ui-state"),
+                ("memento/y", "{}"),
+            ],
+        )
+        # Ensure target DB mtime is strictly newer than the old workspace DB.
+        old_mtime = (fx["old_ws_dir"] / "state.vscdb").stat().st_mtime
+        os.utime(target_db, (old_mtime + 10, old_mtime + 10))
+
+        # Default -Apply skips copying old state over newer populated target DB.
+        protected = self.run_engine(
+            new_path=fx["new_dir"],
+            old_path=fx["old_dir"],
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            backup_dir=fx["fbackup_dir"],
+            apply=True,
+            overwrite_state=False,
+        )
+        self.assertEqual(protected.returncode, 0, protected.stdout + protected.stderr)
+        self.assertIn("skipping state copy to protect newer UI state", protected.stdout)
+        conn = sqlite3.connect(target_db)
+        try:
+            keys = {r[0] for r in conn.execute("SELECT key FROM ItemTable").fetchall()}
+            self.assertIn("sentinel.newer", keys)
+        finally:
+            conn.close()
+
+        # -OverwriteExistingState forces copying old state over the target DB.
+        forced = self.run_engine(
+            new_path=fx["new_dir"],
+            old_path=fx["old_dir"],
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            backup_dir=fx["fbackup_dir"],
+            apply=True,
+            overwrite_state=True,
+        )
+        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+        conn = sqlite3.connect(target_db)
+        try:
+            items = dict(conn.execute("SELECT key, value FROM ItemTable").fetchall())
+            self.assertIn("memento/x", items)
+            self.assertIn("new%20proj.ag", items["memento/x"])
+        finally:
+            conn.close()
+
+    def test_list_backups_and_restore(self) -> None:
+        """-ListBackups lists snapshots and -Restore restores User + .gemini files cleanly."""
+        fx = self.create_fixture()
+        stamp = "20261126_120000"
+        user_bak = fx["app_root"] / f"User_AutoBackup_{stamp}"
+        file_bak = fx["app_root"] / f"Migration_FileBackup_{stamp}"
+        shutil.copytree(fx["user_dir"], user_bak)
+
+        applied = self.run_engine(
+            new_path=fx["new_dir"],
+            old_path=fx["old_dir"],
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            backup_dir=file_bak,
+            apply=True,
+        )
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+
+        listed = self.run_engine(
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            app_root=fx["app_root"],
+            list_backups=True,
+        )
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        self.assertIn(stamp, listed.stdout)
+        self.assertIn("User_AutoBackup", listed.stdout)
+        self.assertIn("Migration_FileBackup", listed.stdout)
+
+        # Invalid stamp must be rejected.
+        bad = self.run_engine(
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            app_root=fx["app_root"],
+            restore_stamp="../evil",
+        )
+        self.assertEqual(bad.returncode, 1)
+
+        # Preview does not modify migrated files.
+        preview = self.run_engine(
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            app_root=fx["app_root"],
+            restore_stamp=stamp,
+            apply=False,
+        )
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertIn("RESTORE PREVIEW COMPLETE", preview.stdout)
+        p1 = json.loads((fx["gemini_root"] / "config" / "projects" / "1.json").read_text(encoding="utf-8"))
+        self.assertEqual(p1["name"], "new proj.ag")
+
+        # Apply restore reverts both User and .gemini files cleanly.
+        restored = self.run_engine(
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            app_root=fx["app_root"],
+            restore_stamp=stamp,
+            apply=True,
+        )
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertIn("RESTORE COMPLETED SUCCESSFULLY", restored.stdout)
+        p1_restored = json.loads((fx["gemini_root"] / "config" / "projects" / "1.json").read_text(encoding="utf-8"))
+        self.assertEqual(p1_restored["name"], "old proj")
+        self.assertFalse((fx["user_dir"] / "workspaceStorage" / compute_vscode_workspace_hash(fx["new_dir"])).exists())
+
+        gdb = sqlite3.connect(fx["user_dir"] / "globalStorage" / "state.vscdb")
+        try:
+            self.assertEqual(gdb.execute("PRAGMA integrity_check;").fetchone()[0], "ok")
+        finally:
+            gdb.close()
+
+    def test_fts5_local_history_and_multiroot_workspace(self) -> None:
+        """FTS5 index, User/History, and multi-root .code-workspace entries all migrate, verify, and clean up."""
+        fx = self.create_fixture()
+
+        # 1. conversation_summaries.db with FTS5 table
+        cs_db = fx["gemini_root"] / "antigravity" / "conversation_summaries.db"
+        cs_conn = sqlite3.connect(cs_db)
+        try:
+            cs_conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT)")
+            cs_conn.execute(
+                "CREATE VIRTUAL TABLE conversations_fts USING fts5("
+                "conversation_id UNINDEXED, workspace, project, title)"
+            )
+            cs_conn.execute(
+                "INSERT INTO conversation_summaries VALUES (?, ?)",
+                ("cid-target", vscode_uri(fx["old_dir"])),
+            )
+            cs_conn.execute(
+                "INSERT INTO conversation_summaries VALUES (?, ?)",
+                ("cid-other", vscode_uri(fx["other_dir"])),
+            )
+            cs_conn.execute(
+                "INSERT INTO conversations_fts (conversation_id, workspace, project, title) VALUES (?, ?, ?, ?)",
+                ("cid-target", "old%20proj", "old proj", "Target chat"),
+            )
+            cs_conn.execute(
+                "INSERT INTO conversations_fts (conversation_id, workspace, project, title) VALUES (?, ?, ?, ?)",
+                ("cid-other", "old%20proj", "old proj", "Unrelated same-leaf chat"),
+            )
+            cs_conn.commit()
+        finally:
+            cs_conn.close()
+
+        # 2. User/History entry matching VS Code stringHash(resource, 0)
+        hist_old_res = vscode_uri(fx["old_dir"]) + "/src/app.py"
+        hist_new_res = vscode_uri(fx["new_dir"]) + "/src/app.py"
+
+        def vs_hash(s: str) -> str:
+            h = 149417
+            for ch in s:
+                h = (((h << 5) - h) + ord(ch)) & 0xFFFFFFFF
+            if h >= 0x80000000:
+                h -= 0x100000000
+            return f"-{-h:x}" if h < 0 else f"{h:x}"
+
+        old_hist_name = vs_hash(hist_old_res)
+        new_hist_name = vs_hash(hist_new_res)
+        old_hist_dir = fx["user_dir"] / "History" / old_hist_name
+        old_hist_dir.mkdir(parents=True)
+        (old_hist_dir / "entries.json").write_text(
+            json.dumps({"version": 1, "resource": hist_old_res, "entries": [{"id": "abc.py", "timestamp": 100}]}),
+            encoding="utf-8",
+        )
+        (old_hist_dir / "abc.py").write_text("print('hi')\n", encoding="utf-8")
+
+        # 3. Multi-root .code-workspace (moved file + external file referencing moved project)
+        ws_file_moved = fx["new_dir"] / "team.code-workspace"
+        ws_file_moved.write_text(json.dumps({"folders": [{"path": str(fx["old_dir"])}]}, indent=2), encoding="utf-8")
+        old_ws_file_virtual = fx["old_dir"] / "team.code-workspace"
+        multi_old_dir = fx["user_dir"] / "workspaceStorage" / ("e" * 32)
+        multi_old_dir.mkdir(parents=True)
+        (multi_old_dir / "workspace.json").write_text(
+            json.dumps({"workspace": vscode_uri(old_ws_file_virtual)}), encoding="utf-8"
+        )
+        make_item_db(multi_old_dir / "state.vscdb", [("memento/mr", vscode_uri(fx["old_dir"]))])
+
+        ext_ws_file = self.root / "external.code-workspace"
+        ext_ws_file.write_text(
+            json.dumps({"folders": [{"path": str(fx["old_dir"])}, {"path": str(fx["other_dir"])}]}, indent=2),
+            encoding="utf-8",
+        )
+        ext_ws_dir = fx["user_dir"] / "workspaceStorage" / compute_vscode_workspace_hash(ext_ws_file)
+        ext_ws_dir.mkdir(parents=True)
+        (ext_ws_dir / "workspace.json").write_text(json.dumps({"workspace": vscode_uri(ext_ws_file)}), encoding="utf-8")
+
+        applied = self.run_engine(
+            new_path=fx["new_dir"],
+            old_path=fx["old_dir"],
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            backup_dir=fx["fbackup_dir"],
+            apply=True,
+        )
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn("VERIFIED - all checks passed.", applied.stdout)
+
+        # Verify FTS5 updated only cid-target and passes integrity-check.
+        cs_ro = sqlite3.connect(cs_db)
+        try:
+            cs_ro.execute("INSERT INTO conversations_fts(conversations_fts) VALUES('integrity-check');")
+            rows = {
+                r[0]: (r[1], r[2])
+                for r in cs_ro.execute("SELECT conversation_id, workspace, project FROM conversations_fts").fetchall()
+            }
+            self.assertEqual(rows["cid-target"], ("new%20proj.ag", "new proj.ag"))
+            self.assertEqual(rows["cid-other"], ("old%20proj", "old proj"))
+        finally:
+            cs_ro.close()
+
+        # Verify User/History migrated and cleanup removes old history folder.
+        new_hist_dir = fx["user_dir"] / "History" / new_hist_name
+        self.assertTrue((new_hist_dir / "abc.py").is_file())
+        new_ej = json.loads((new_hist_dir / "entries.json").read_text(encoding="utf-8"))
+        self.assertEqual(new_ej["resource"], hist_new_res)
+
+        # Verify multi-root .code-workspace storage + files updated.
+        moved_hash = compute_vscode_workspace_hash(ws_file_moved)
+        self.assertTrue((fx["user_dir"] / "workspaceStorage" / moved_hash / "state.vscdb").is_file())
+        self.assertEqual(json.loads(ws_file_moved.read_text(encoding="utf-8"))["folders"][0]["path"], str(fx["new_dir"]))
+        ext_folders = json.loads(ext_ws_file.read_text(encoding="utf-8"))["folders"]
+        self.assertEqual(ext_folders[0]["path"], str(fx["new_dir"]))
+        self.assertEqual(ext_folders[1]["path"], str(fx["other_dir"]))
+
+        cleaned = self.run_engine(
+            new_path=fx["new_dir"],
+            old_path=fx["old_dir"],
+            user_dir=fx["user_dir"],
+            gemini_root=fx["gemini_root"],
+            cleanup=True,
+            apply=True,
+        )
+        self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+        self.assertFalse(old_hist_dir.exists())
+        self.assertTrue(new_hist_dir.is_dir())
+        self.assertFalse(multi_old_dir.exists())
+        self.assertTrue((fx["user_dir"] / "workspaceStorage" / moved_hash).is_dir())
+
+    def test_rename_on_disk_and_rollback(self) -> None:
+        """-RenameOnDisk helper handles normal & case-only renames, dry-run hashing, and rollback."""
+        # 1. Engine dry-run hash calculation when NEW_PATH does not yet exist on disk.
+        src = self.root / "rn_dry"
+        src.mkdir()
+        existing_old = src / "BeforeRename"
+        existing_old.mkdir()
+        time.sleep(0.02)
+        target_new = src / "AfterRename"
+        u_dir = self.root / "rn_app" / "User"
+        g_root = self.root / "rn_gem"
+        (u_dir / "globalStorage").mkdir(parents=True)
+        ws_old = u_dir / "workspaceStorage" / ("f" * 32)
+        ws_old.mkdir(parents=True)
+        (ws_old / "workspace.json").write_text(json.dumps({"folder": vscode_uri(existing_old)}), encoding="utf-8")
+        make_item_db(u_dir / "globalStorage" / "state.vscdb", [])
+        (u_dir / "globalStorage" / "storage.json").write_text("{}", encoding="utf-8")
+        (g_root / "config" / "projects").mkdir(parents=True)
+
+        dry = self.run_engine(
+            new_path=target_new,
+            old_path=existing_old,
+            user_dir=u_dir,
+            gemini_root=g_root,
+            rename_dryrun=True,
+            apply=False,
+        )
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertTrue(existing_old.is_dir())
+        self.assertFalse(target_new.exists())
+        # Target hash computed during dry-run must match the hash after NTFS preserves creation time.
+        expected_if_renamed = compute_vscode_workspace_hash(target_new) if target_new.exists() else None
+        self.assertIsNone(expected_if_renamed)
+        self.assertIn("Created target hash:", dry.stdout)
+
+        # 2. PowerShell Move-DirectorySafely handles case-only rename + rollback on NTFS.
+        ps_case = self.root / "CaseBox"
+        ps_case.mkdir()
+        ps_old = ps_case / "MyApp"
+        ps_old.mkdir()
+        (ps_old / "file.txt").write_text("ok", encoding="utf-8")
+        ps_new = ps_case / "myapp"
+        ps_check = (
+            "$tokens = $null; $errs = $null; "
+            f"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{SCRIPT_PATH}', [ref]$tokens, [ref]$errs); "
+            "$fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Move-DirectorySafely' }, $true); "
+            "Invoke-Expression $fn.Extent.Text; "
+            f"Move-DirectorySafely '{ps_old}' '{ps_new}' $true; "
+            f"$leaf1 = (Get-Item -LiteralPath '{ps_case}').GetDirectories()[0].Name; "
+            f"Move-DirectorySafely '{ps_new}' '{ps_old}' $true; "
+            f"$leaf2 = (Get-Item -LiteralPath '{ps_case}').GetDirectories()[0].Name; "
+            "Write-Output \"$leaf1|$leaf2\""
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_check],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "myapp|MyApp")
+
+        # 3. Full PowerShell -RenameOnDisk -Apply end-to-end when Antigravity is not running (e.g. CI).
+        running_check = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "if (Get-Process | Where-Object { $_.ProcessName -match 'Antigravity' }) { exit 99 }"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if running_check.returncode == 0:
+            ps_env = os.environ.copy()
+            ps_env["APPDATA"] = str(self.root / "rn_app_ps")
+            ps_env["USERPROFILE"] = str(self.root / "rn_home_ps")
+            ps_user = Path(ps_env["APPDATA"]) / "Antigravity IDE" / "User"
+            (ps_user / "globalStorage").mkdir(parents=True)
+            ps_ws = ps_user / "workspaceStorage" / ("9" * 32)
+            ps_ws.mkdir(parents=True)
+            (ps_ws / "workspace.json").write_text(json.dumps({"folder": vscode_uri(existing_old)}), encoding="utf-8")
+            make_item_db(
+                ps_user / "globalStorage" / "state.vscdb",
+                [("history.recentlyOpenedPathsList", json.dumps({"entries": [{"folderUri": vscode_uri(existing_old)}]}))],
+            )
+            (ps_user / "globalStorage" / "storage.json").write_text("{}", encoding="utf-8")
+            (Path(ps_env["USERPROFILE"]) / ".gemini" / "config" / "projects").mkdir(parents=True)
+
+            e2e = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(SCRIPT_PATH),
+                    "-NewProjectPath",
+                    str(target_new),
+                    "-OldFolderName",
+                    existing_old.name,
+                    "-RenameOnDisk",
+                    "-Apply",
+                ],
+                env=ps_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(e2e.returncode, 0, e2e.stdout + e2e.stderr)
+            self.assertTrue(target_new.is_dir())
+            self.assertFalse(existing_old.exists())
+            self.assertIn("VERIFIED", e2e.stdout)
 
 
 if __name__ == "__main__":

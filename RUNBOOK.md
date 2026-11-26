@@ -33,12 +33,13 @@ When you rename or move a project directory on Windows, Antigravity stores works
 
 | Target | Path | What Changes |
 | --- | --- | --- |
-| Workspace storage | `%APPDATA%\<AppDataFolderName>\User\workspaceStorage\<md5>` | Computes the IDE's target `<md5>` hash, creates canonical `workspace.json` (`file:///c%3A/...`, LF line endings), and copies state/extension data from the old hash folder (preserving the new `workspace.json`). |
+| Workspace storage | `%APPDATA%\<AppDataFolderName>\User\workspaceStorage\<md5>` | Computes the IDE's target `<md5>` hash (for both folder and multi-root `.code-workspace` entries), creates canonical `workspace.json` (`file:///c%3A/...`, LF line endings), and copies state/extension data from the old hash folder unless target `state.vscdb` is newer and already populated. Also rewrites paths inside referenced `.code-workspace` files. |
 | Global SQLite state | `%APPDATA%\<AppDataFolderName>\User\globalStorage\state.vscdb` | Updates `ItemTable` entries (such as `history.recentlyOpenedPathsList`, `antigravityUnifiedStateSync.sidebarWorkspaces` including nested base64 protobufs, terminal/extension history). Syncs `state.vscdb.backup` if present. |
 | Workspace SQLite state | `%APPDATA%\<AppDataFolderName>\User\workspaceStorage\<md5>\state.vscdb` | Updates `ItemTable` entries referencing the old path and syncs `state.vscdb.backup` if present. |
+| Local History | `%APPDATA%\<AppDataFolderName>\User\History\<hash>` | Migrates VS Code file timeline snapshots (`entries.json` `resource` URIs and files) into the new VS Code `stringHash` folder, merging entries if the target already exists. |
 | Global JSON state | `%APPDATA%\<AppDataFolderName>\User\globalStorage\storage.json` | Traverses JSON and rewrites workspace/window path references. |
 | Hot-exit backups | `%APPDATA%\<AppDataFolderName>\Backups\workspaces.json` & `Backups\<md5>\meta.json` | Updates `workspaces.json` and copies `Backups\<old_hash>` to `Backups\<new_hash>` (if not already present), rewriting `meta.json`. |
-| Antigravity `.gemini` data | `%USERPROFILE%\.gemini\antigravity` & `%USERPROFILE%\.gemini\antigravity-ide` | Scans `.db` (SQLite tables), `.pb` (<= 50 MB), and `.json`, `.md`, `.txt`, `.pbtxt` (<= 10 MB). Skips `.system_generated`, `browser_recordings`, `tempmediastorage`, `node_modules`, `.git`, `cache`, `log`, `logs`, `bin`, `builtin`, `plugins`, `plugin_data`, `crashes`. |
+| Antigravity `.gemini` data | `%USERPROFILE%\.gemini\antigravity` & `%USERPROFILE%\.gemini\antigravity-ide` | Scans `.db` (SQLite tables plus `conversations_fts` in `conversation_summaries.db`), `.pb` (<= 50 MB), and `.json`, `.md`, `.txt`, `.pbtxt` (<= 10 MB). Skips `.system_generated`, `browser_recordings`, `tempmediastorage`, `node_modules`, `.git`, `cache`, `log`, `logs`, `bin`, `builtin`, `plugins`, `plugin_data`, `crashes`. |
 | Antigravity 2.0 projects | `%USERPROFILE%\.gemini\config\projects\*.json` & `%USERPROFILE%\.gemini\projects.json` | Updates `projectResources` URIs, `permissionGrants` paths, project `name` (when matching the old folder name), and lowercase `projects.json` keys/values. |
 
 ---
@@ -51,7 +52,7 @@ When you rename or move a project directory on Windows, Antigravity stores works
 - **External Terminal & Closed Apps (for write operations):**
   - Both the **Antigravity IDE** and the **Antigravity agent app** must be completely closed before running a migration dry-run/apply or `-Cleanup -Apply`.
   - Run the script from an **external PowerShell window** (not Antigravity's integrated terminal, because Antigravity processes will still be running).
-  - **Exception (read-only modes):** `-Verify`, and `-Cleanup` *without* `-Apply` (preview mode), are strictly read-only and are allowed while Antigravity is open (the script prints a `NOTE` reminding you that closing Antigravity yields the most reliable on-disk check).
+  - **Exception (read-only modes):** `-Verify`, `-ListBackups`, `-Cleanup` *without* `-Apply`, and `-Restore` *without* `-Apply` are strictly read-only and are allowed while Antigravity is open (the script prints a `NOTE` reminding you that closing Antigravity yields the most reliable on-disk check).
 
 ### Pre-Flight Process & Lock Check
 
@@ -71,14 +72,19 @@ Get-ChildItem -Path "$env:APPDATA\Antigravity IDE\User" -Recurse -Include "*.vsc
 
 | Parameter | Type / Default | Required | Description |
 | --- | --- | --- | --- |
-| `-NewProjectPath` | `string` | Yes | Existing (already renamed/moved) project root directory. |
-| `-OldFolderName` | `string` | Yes | Old folder leaf name (e.g., `"old-name"`) or full old path (e.g., `"D:\OldParent\old-name"`). A leaf name is assumed to share the same parent directory as `-NewProjectPath`. Case-only renames (e.g., `MyApp` -> `myapp`) are supported. |
+| `-NewProjectPath` | `string` | Yes (Migrate set) | Existing (already renamed/moved) project root directory, or the destination path when `-RenameOnDisk` is set. |
+| `-OldFolderName` | `string` | Yes (Migrate set) | Old folder leaf name (e.g., `"old-name"`) or full old path (e.g., `"D:\OldParent\old-name"`). A leaf name is assumed to share the same parent directory as `-NewProjectPath`. Case-only renames (e.g., `MyApp` -> `myapp`) are supported. |
 | `-AppDataFolderName` | `string` (`"Antigravity IDE"`) | No | Subfolder under `%APPDATA%` containing Antigravity's `User` and `Backups` directories. |
-| `-Apply` | `switch` | No | Commits changes. Without `-Apply`, migration runs as a dry-run and `-Cleanup` runs as a preview. During migration, `-Apply` creates backups and runs the Verification Report automatically afterward. |
-| `-Verify` | `switch` | No | Read-only audit that checks workspace hash, `workspace.json`, SQLite health and leftover old references, sidebar protobuf consistency, Antigravity 2.0 project link, and `.gemini` files. |
-| `-Cleanup` | `switch` | No | Removes leftover old/duplicate `workspaceStorage` entries and migrated `Backups\<hash>` folders. Always runs `-Verify` first and refuses to delete if any check is `FAIL`. Never re-runs the migration itself. Preview by default; add `-Apply` to delete. |
+| `-Apply` | `switch` | No | Commits changes for migration, `-Cleanup`, or `-Restore`. Without `-Apply`, runs as a read-only dry-run / preview. During migration, `-Apply` creates backups and runs the Verification Report automatically afterward. |
+| `-Verify` | `switch` | No | Read-only audit that checks workspace hash, `workspace.json`, SQLite health and leftover old references, sidebar protobuf consistency, Local History, Antigravity 2.0 project link, and `.gemini` files. |
+| `-Cleanup` | `switch` | No | Removes leftover old/duplicate `workspaceStorage` entries, migrated `Backups\<hash>` folders, and migrated `User\History` folders. Always runs `-Verify` first and refuses to delete if any check is `FAIL`. Never re-runs the migration itself. Preview by default; add `-Apply` to delete. |
 | `-IncludeBackups` | `switch` | No | Used with `-Cleanup`: also includes aged script backups (`User_AutoBackup_*`, `Migration_FileBackup_*`, `.gemini\antigravity_AutoBackup_*`) older than `-KeepBackupDays`. The newest backup of each kind is always kept. |
 | `-KeepBackupDays` | `int` (`7`, range `0`–`3650`) | No | Minimum age in days for `-IncludeBackups` to mark older backups for deletion. |
+| `-OverwriteExistingState` | `switch` | No | Forces copying old `workspaceStorage` state over a newer, already-populated target `state.vscdb`. By default, newer target UI state is protected from accidental re-apply overwrites. |
+| `-RenameOnDisk` | `switch` | No | Lets the script rename/move `OldFolderName` -> `NewProjectPath` on disk itself (after confirming Antigravity is closed and no SQLite locks exist), then migrates metadata. Rolls back the folder rename on failure. |
+| `-ListBackups` | `switch` | Yes (ListBackups set) | Lists available migration backup timestamps (`User_AutoBackup_*`, `Migration_FileBackup_*`, `antigravity_AutoBackup_*`) with sizes and manifest counts. Read-only. |
+| `-Restore` | `switch` | Yes (Restore set) | Restores a prior migration snapshot identified by `-BackupStamp`. Preview by default; add `-Apply` to commit. |
+| `-BackupStamp` | `string` | Yes (Restore set) | Backup timestamp (`yyyyMMdd_HHmmss`) to restore with `-Restore`. |
 
 ### Disallowed Switch Combinations
 
@@ -87,6 +93,9 @@ The script will immediately fail (`exit 1`) if you pass:
 - `-Apply` together with `-Verify` (`-Apply` already runs verification after committing).
 - `-Cleanup` together with `-Verify` (`-Cleanup` already runs verification first).
 - `-IncludeBackups` without `-Cleanup`.
+- `-ListBackups` together with `-Apply`.
+- `-RenameOnDisk` or `-OverwriteExistingState` together with `-Verify` or `-Cleanup`.
+- Mixing `-ListBackups` or `-Restore` with `-NewProjectPath` / `-OldFolderName` (distinct PowerShell parameter sets).
 
 ---
 
@@ -95,8 +104,8 @@ The script will immediately fail (`exit 1`) if you pass:
 ### Step 1 — Close Antigravity & Rename the Folder on Disk
 
 1. Save any open files and close **all** Antigravity IDE windows and the Antigravity agent app (check the system tray / Task Manager for lingering `Antigravity` background processes).
-2. Rename or move the project folder on disk (Explorer, `Rename-Item`, `Move-Item`, etc.).
-   - If you have not renamed the folder yet (and the old path still exists on disk), dry-run/apply will refuse with: `The old path still exists on disk: ... Rename/move the folder first.`
+2. Rename or move the project folder on disk (Explorer, `Rename-Item`, `Move-Item`, etc.) — **or** leave it at the old path and add `-RenameOnDisk` to Steps 2–3 so the script renames it safely for you.
+   - If you have not renamed the folder yet and omit `-RenameOnDisk`, dry-run/apply will refuse with: `The old path still exists on disk: ... Rename/move the folder first (or pass -RenameOnDisk).`
 3. Open an **external** PowerShell terminal and `cd` to the directory containing `Migrate-AntigravityWorkspace.ps1`.
 
 ---
@@ -296,9 +305,31 @@ If a runtime error occurs inside the Python engine during `-Apply`:
 - Any newly created files/directories tracked during the run are deleted.
 - Check the console output to confirm `[Rollback] Original state restored.`
 
+### One-Command Recovery (`-ListBackups` & `-Restore`)
+
+1. **List available backup timestamps** (read-only):
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -ListBackups
+   ```
+
+2. **Preview what `-Restore` will revert** (read-only):
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000
+   ```
+
+3. **Close Antigravity completely and restore:**
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000 -Apply
+   ```
+
+   `-Restore -Apply` replaces `User` from `User_AutoBackup_<stamp>`, replays non-`User` files (such as `.gemini` and `Backups`) from `Migration_FileBackup_<stamp>\manifest.jsonl`, removes newly tracked files/folders, and runs `PRAGMA integrity_check` on every restored database.
+
 ### Manual Recovery
 
-If you need to revert a completed migration manually (for example, after reopening Antigravity or renaming the folder back):
+If you prefer to revert a migration manually without `-Restore`:
 
 1. **Close Antigravity completely** (confirm via Task Manager / `Get-Process`).
 2. **Restore the `User` directory** from `User_AutoBackup_<stamp>`:
@@ -353,8 +384,7 @@ If you need to revert a completed migration manually (for example, after reopeni
 ## 8. Known Limitations
 
 - **Compressed or encrypted blobs:** Binary payloads that are compressed or encrypted cannot be decoded as protobuf or UTF-8 text and are left untouched.
-- **SQLite special tables skipped:** `sqlite_*` internal tables, `VIRTUAL TABLE`s (such as FTS5 full-text search indexes in `conversation_summaries.db`), and `WITHOUT ROWID` tables are intentionally skipped.
-- **Local edit history:** `%APPDATA%\<AppDataFolderName>\User\History` (VS Code local file timeline snapshots) is not migrated.
+- **SQLite special tables skipped:** `sqlite_*` internal tables, `WITHOUT ROWID` tables, and generic `VIRTUAL TABLE`s are skipped (except `conversations_fts` in `conversation_summaries.db`, whose `workspace` and `project` columns are updated and integrity-checked).
 - **`.gemini` file size caps:** Protobuf `.pb` files larger than **50 MB** and `.json`/`.md`/`.txt`/`.pbtxt` files larger than **10 MB** are skipped during `.gemini` scanning.
 - **Platform:** Designed for **Windows** only (`%APPDATA%`, Win32 `GetFileAttributesExW` file creation time, and Windows drive-letter URIs).
 
@@ -364,17 +394,24 @@ If you need to revert a completed migration manually (for example, after reopeni
 
 ```powershell
 # 1. Dry-run preview (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "C:\Path\To\new-name" -OldFolderName "old-name"
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name"
 
 # 2. Apply migration + automatic verification (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "C:\Path\To\new-name" -OldFolderName "old-name" -Apply
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Apply
+
+# 2b. Rename on disk AND migrate in one step (Antigravity closed)
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -RenameOnDisk -Apply
 
 # 3. Standalone verification (read-only, safe anytime)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "C:\Path\To\new-name" -OldFolderName "old-name" -Verify
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Verify
 
 # 4. Leftover cleanup preview (read-only)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "C:\Path\To\new-name" -OldFolderName "old-name" -Cleanup
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Cleanup
 
 # 5. Delete verified leftovers + prune script backups older than 7 days (Antigravity closed)
-powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "C:\Path\To\new-name" -OldFolderName "old-name" -Cleanup -Apply -IncludeBackups -KeepBackupDays 7
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -NewProjectPath "$env:USERPROFILE\Downloads\Source-Code\new-name" -OldFolderName "old-name" -Cleanup -Apply -IncludeBackups -KeepBackupDays 7
+
+# 6. List backups and restore a prior migration snapshot (Antigravity closed for -Apply)
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -ListBackups
+powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000 -Apply
 ```
