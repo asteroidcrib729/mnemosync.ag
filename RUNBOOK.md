@@ -46,9 +46,11 @@ When you rename or move a project directory on Windows, Antigravity stores works
 
 ## 2. Prerequisites
 
-- **OS:** Windows only (the embedded engine exits if `os.name != "nt"`).
-- **PowerShell:** Windows PowerShell (`powershell.exe`) or PowerShell 7+ (`pwsh.exe`), typically invoked with `-ExecutionPolicy Bypass` if local script signing is restricted.
-- **Python 3:** `python` or `py -3` must be available in `PATH` (used for transactional SQLite and wire-level protobuf updates).
+- **OS & Script:**
+  - **Windows:** [`Migrate-AntigravityWorkspace.ps1`](./Migrate-AntigravityWorkspace.ps1) (PowerShell / `powershell -ExecutionPolicy Bypass`).
+  - **Linux:** [`migrate-antigravity-workspace-linux.sh`](./migrate-antigravity-workspace-linux.sh) (Bash, `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE`).
+  - **macOS:** [`migrate-antigravity-workspace-macos.sh`](./migrate-antigravity-workspace-macos.sh) (Bash/zsh, `~/Library/Application Support/Antigravity IDE`).
+- **Python 3:** `python` / `py -3` (Windows) or `python3` (Linux/macOS) must be available in `PATH` (used for transactional SQLite and wire-level protobuf updates).
 - **External Terminal & Closed Apps (for write operations):**
   - Both the **Antigravity IDE** and the **Antigravity agent app** must be completely closed before running a migration dry-run/apply or `-Cleanup -Apply`.
   - Run the script from an **external PowerShell window** (not Antigravity's integrated terminal, because Antigravity processes will still be running).
@@ -386,11 +388,13 @@ If you prefer to revert a migration manually without `-Restore`:
 - **Compressed or encrypted blobs:** Binary payloads that are compressed or encrypted cannot be decoded as protobuf or UTF-8 text and are left untouched.
 - **SQLite special tables skipped:** `sqlite_*` internal tables, `WITHOUT ROWID` tables, and generic `VIRTUAL TABLE`s are skipped (except `conversations_fts` in `conversation_summaries.db`, whose `workspace` and `project` columns are updated and integrity-checked).
 - **`.gemini` file size caps:** Protobuf `.pb` files larger than **50 MB** and `.json`/`.md`/`.txt`/`.pbtxt` files larger than **10 MB** are skipped during `.gemini` scanning.
-- **Platform:** Designed for **Windows** only (`%APPDATA%`, Win32 `GetFileAttributesExW` file creation time, and Windows drive-letter URIs).
+- **Platform separation:** Each OS has its own native script ([`Migrate-AntigravityWorkspace.ps1`](./Migrate-AntigravityWorkspace.ps1) for Windows, [`migrate-antigravity-workspace-linux.sh`](./migrate-antigravity-workspace-linux.sh) for Linux, and [`migrate-antigravity-workspace-macos.sh`](./migrate-antigravity-workspace-macos.sh) for macOS) and must be executed on its matching OS.
 
 ---
 
 ## 9. Quick-Reference Cheat Sheet
+
+### Windows (`Migrate-AntigravityWorkspace.ps1`)
 
 ```powershell
 # 1. Dry-run preview (Antigravity closed)
@@ -414,4 +418,26 @@ powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -New
 # 6. List backups and restore a prior migration snapshot (Antigravity closed for -Apply)
 powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -ListBackups
 powershell -ExecutionPolicy Bypass -File .\Migrate-AntigravityWorkspace.ps1 -Restore -BackupStamp 20261126_120000 -Apply
+```
+
+### Linux & macOS (`--long-flag` Equivalents)
+
+The Linux and macOS shell scripts share identical CLI flags and workflow. Make them executable once (`chmod +x *.sh`), ensure Antigravity is closed for write commands, and pass:
+
+| Windows Switch / Path | Linux (`migrate-antigravity-workspace-linux.sh`) | macOS (`migrate-antigravity-workspace-macos.sh`) |
+| --- | --- | --- |
+| Data root | `${XDG_CONFIG_HOME:-$HOME/.config}/Antigravity IDE` | `$HOME/Library/Application Support/Antigravity IDE` |
+| Workspace hash salt | Directory inode (`st_ino`) | Creation time in integer ms (`birthtime`) |
+| Path matching | Case-sensitive (except `~/.gemini/projects.json`) | Case-insensitive |
+| CLI flags | `--new-project-path`, `--old-folder-name`, `--app-data-folder-name`, `--apply`, `--verify`, `--cleanup`, `--include-backups`, `--keep-backup-days`, `--overwrite-existing-state`, `--rename-on-disk`, `--list-backups`, `--restore`, `--backup-stamp` | Same `--long-flag` interface as Linux |
+
+```bash
+# Linux (or replace with ./migrate-antigravity-workspace-macos.sh on macOS)
+chmod +x ./migrate-antigravity-workspace-linux.sh
+./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name"
+./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --apply
+./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --verify
+./migrate-antigravity-workspace-linux.sh --new-project-path "$HOME/src/new-name" --old-folder-name "old-name" --cleanup --apply
+./migrate-antigravity-workspace-linux.sh --list-backups
+./migrate-antigravity-workspace-linux.sh --restore --backup-stamp 20261126_120000 --apply
 ```

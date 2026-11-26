@@ -55,3 +55,41 @@ jobs:
 
       - name: Run automated migration test suite
         run: python -m unittest discover -s tests -v
+
+  validate-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Bash syntax and ShellCheck
+        run: |
+          bash -n ./migrate-antigravity-workspace-linux.sh
+          shellcheck ./migrate-antigravity-workspace-linux.sh
+
+      - name: Run Linux migration tests
+        run: python3 -m unittest discover -s tests -p "test_posix_migration.py" -v
+
+  validate-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Bash syntax and ShellCheck
+        run: |
+          bash -n ./migrate-antigravity-workspace-macos.sh
+          shellcheck ./migrate-antigravity-workspace-macos.sh
+
+      - name: Run macOS migration tests
+        run: python3 -m unittest discover -s tests -p "test_posix_migration.py" -v
