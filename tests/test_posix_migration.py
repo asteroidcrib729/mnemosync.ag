@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import quote
@@ -94,7 +95,7 @@ def make_item_db(path: Path, rows: list[tuple[str, str | bytes]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
-        conn.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
         conn.executemany("INSERT INTO ItemTable VALUES (?, ?)", rows)
         conn.commit()
     finally:
@@ -402,6 +403,15 @@ class _NativePosixE2EMixin:
         finally:
             cs.close()
 
+        # Capture the pre-migration backup stamp before step 3 creates a second backup
+        listed_initial = self.run_cli("--list-backups")
+        self.assertEqual(listed_initial.returncode, 0, listed_initial.stdout + listed_initial.stderr)
+        m_init = re.search(r"(\d{8}_\d{6})\s+\|", listed_initial.stdout)
+        self.assertIsNotNone(m_init, listed_initial.stdout)
+        assert m_init is not None
+        first_stamp = m_init.group(1)
+        time.sleep(1.1)
+
         # 3. Overwrite protection protects newer target state.vscdb
         new_db = live_ws / "state.vscdb"
         make_item_db(new_db, [("sentinel.newer", "keep"), ("memento/y", "{}")])
@@ -410,14 +420,18 @@ class _NativePosixE2EMixin:
         reapp = self.run_cli("--new-project-path", str(fx["new_dir"]), "--old-folder-name", fx["old_dir"].name, "--apply")
         self.assertEqual(reapp.returncode, 0, reapp.stdout + reapp.stderr)
         self.assertIn("skipping state copy", reapp.stdout)
+        chk = sqlite3.connect(new_db)
+        try:
+            val = chk.execute("SELECT value FROM ItemTable WHERE key='sentinel.newer'").fetchone()
+            self.assertEqual(val, ("keep",))
+        finally:
+            chk.close()
 
         # 4. --list-backups & --restore (preview then apply), then re-apply and --cleanup
         listed = self.run_cli("--list-backups")
         self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
-        m = re.search(r"(\d{8}_\d{6})\s+\|", listed.stdout)
-        self.assertIsNotNone(m, listed.stdout)
-        assert m is not None
-        stamp = m.group(1)
+        self.assertIn(first_stamp, listed.stdout)
+        stamp = first_stamp
 
         res_prev = self.run_cli("--restore", "--backup-stamp", stamp)
         self.assertEqual(res_prev.returncode, 0, res_prev.stdout + res_prev.stderr)

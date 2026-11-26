@@ -67,10 +67,11 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Bash syntax and ShellCheck
+      - name: Bash syntax and ShellCheck (Linux + macOS)
         run: |
           bash -n ./MnemoSync-Linux.sh
-          shellcheck ./MnemoSync-Linux.sh
+          bash -n ./MnemoSync-MacOS.sh
+          shellcheck ./MnemoSync-Linux.sh ./MnemoSync-MacOS.sh
 
       - name: Run Linux migration tests
         run: python3 -m unittest discover -s tests -p "test_posix_migration.py" -v
@@ -86,10 +87,8 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Bash syntax and ShellCheck
-        run: |
-          bash -n ./MnemoSync-MacOS.sh
-          shellcheck ./MnemoSync-MacOS.sh
+      - name: Bash syntax check
+        run: bash -n ./MnemoSync-MacOS.sh
 
       - name: Run macOS migration tests
         run: python3 -m unittest discover -s tests -p "test_posix_migration.py" -v
